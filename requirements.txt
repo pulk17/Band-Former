@@ -1,0 +1,33 @@
+# ──────────────────────────────────────────────────────────────
+# Music Tab Engine  —  Python Dependencies
+# ──────────────────────────────────────────────────────────────
+# Install with:  pip install -r requirements.txt
+#
+# Notes:
+#   • PyTorch (torch/torchaudio) should be installed first via
+#     the official instructions at https://pytorch.org/get-started
+#     so you get the correct CUDA build for your GPU.
+#   • FFmpeg must be installed on your system for audio decoding.
+# ──────────────────────────────────────────────────────────────
+
+# Core — PyTorch ecosystem
+torch
+torchaudio
+
+# Stage 1 — Source Separation (HTDemucs via audio-separator)
+audio-separator[gpu]
+
+# Stage 2 — Beat Tracking
+beat_this
+
+# Stage 3 — Pitch / Note Extraction (Basic Pitch by Spotify)
+basic-pitch
+
+# Utilities
+numpy
+scipy
+librosa
+soundfile
+
+# Testing
+pytest

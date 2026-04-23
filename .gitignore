@@ -1,0 +1,53 @@
+# ──────────────────────────────────────────────────────────────
+# Band-Former  —  .gitignore
+# ──────────────────────────────────────────────────────────────
+
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+*.egg
+.python-version
+
+# ── Virtual environment ──────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── Model weights (large binary files) ──────────────────────
+pipeline/models/*.th
+pipeline/models/*.ckpt
+
+# ── Audio data ───────────────────────────────────────────────
+data/input/
+data/output/
+
+# ── C++ build artifacts ──────────────────────────────────────
+tab_engine/build/
+tab_engine/combinred.txt
+
+# ── External libraries (vendored, too large for repo) ────────
+tab_engine/include/nlohmann/
+
+# ── Test files ───────────────────────────────────────────────
+tab_engine/tests/
+test_*.py
+
+# ── Scratch / generated ─────────────────────────────────────
+combine.py
+combined.txt
+*.json
+!requirements.txt
+
+# ── IDE / Editor ─────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS junk ──────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
