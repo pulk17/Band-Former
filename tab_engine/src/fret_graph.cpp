@@ -2,6 +2,7 @@
 #include "guitar.hpp"
 #include <iostream>
 #include <iomanip>
+#include <utility>
 #include <vector>
 
 CandidateGraph build_candidate_graph(const std::vector<NoteEvent>& notes){

@@ -6,6 +6,10 @@ from pipeline.config import DEVICE
 
 logger = logging.getLogger(__name__)
 
+# YourMT3 (and the MT3 family) operate at 16 kHz mono.
+_MT3_SAMPLE_RATE = 16_000
+_MODEL = "yourmt3"
+
 
 @dataclass
 class NoteEvent:
@@ -15,12 +19,52 @@ class NoteEvent:
     velocity: float      # amplitude/loudness, 0.0 to 1.0
 
 
+def _midi_to_note_events(midi) -> list["NoteEvent"]:
+    """Convert a mido.MidiFile into NoteEvents.
+
+    Iterating a mido.MidiFile yields its tracks already merged in chronological
+    order, with each message's ``.time`` expressed as a *delta in seconds*
+    (mido applies the tempo map for us). We accumulate absolute time and pair
+    each note_on with its matching note_off.
+    """
+    notes: list[NoteEvent] = []
+    active: dict[tuple[int, int], tuple[float, int]] = {}
+    abs_time = 0.0
+
+    for msg in midi:
+        abs_time += msg.time
+
+        is_note_on = msg.type == "note_on" and msg.velocity > 0
+        is_note_off = msg.type == "note_off" or (
+            msg.type == "note_on" and msg.velocity == 0
+        )
+
+        if is_note_on:
+            active[(msg.channel, msg.note)] = (abs_time, msg.velocity)
+        elif is_note_off:
+            key = (msg.channel, msg.note)
+            if key in active:
+                start_t, vel = active.pop(key)
+                if abs_time > start_t and 0 <= msg.note <= 127:
+                    notes.append(NoteEvent(
+                        start_time=start_t,
+                        end_time=abs_time,
+                        pitch=msg.note,
+                        velocity=vel / 127.0,
+                    ))
+
+    return notes
+
+
 def extract_notes(audio_path: Path | str) -> list[NoteEvent]:
     """
-    Transcribe a guitar stem WAV into a list of NoteEvents using Basic Pitch.
+    Transcribe a guitar stem WAV into a list of NoteEvents using YourMT3
+    (via the ``mt3-infer`` toolkit).
 
-    Basic Pitch returns polyphonic MIDI note events — multiple notes can have
-    the same or overlapping timestamps, which is correct for chords.
+    YourMT3 is a multi-instrument transcription model that is dramatically more
+    accurate than Basic Pitch on real, full-band material. Because the input
+    here is the *isolated* guitar stem, every transcribed note is treated as a
+    guitar note.
 
     Args:
         audio_path: Path to the guitar stem WAV (output of separation stage)
@@ -33,46 +77,26 @@ def extract_notes(audio_path: Path | str) -> list[NoteEvent]:
     if not audio_path.exists():
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-    from basic_pitch.inference import predict
-    from basic_pitch import ICASSP_2022_MODEL_PATH
+    import librosa
+    from mt3_infer import transcribe
 
-    logger.info("Running Basic Pitch on '%s'...", audio_path.name)
+    logger.info("Loading '%s' at %d Hz mono...", audio_path.name, _MT3_SAMPLE_RATE)
+    audio, _sr = librosa.load(str(audio_path), sr=_MT3_SAMPLE_RATE, mono=True)
 
-    # predict() returns a 3-tuple:
-    #   [0] model_output   — raw neural network output dict (we don't need this)
-    #   [1] midi_data      — pretty_midi object (useful later for export)
-    #   [2] note_events    — list of tuples: (start_sec, end_sec, pitch, amplitude)
-    #
-    # We pass the model path explicitly so Basic Pitch doesn't re-search
-    # for available backends on every call.
-    _model_output, _midi_data, raw_note_events = predict(
-        audio_path=str(audio_path),
-        model_or_model_path=ICASSP_2022_MODEL_PATH,
+    device = "cuda" if DEVICE.type == "cuda" else "cpu"
+    logger.info("Running YourMT3 transcription (device: %s)...", device)
+
+    midi = transcribe(
+        audio,
+        model=_MODEL,
+        sr=_MT3_SAMPLE_RATE,
+        device=device,
     )
 
-    notes: list[NoteEvent] = []
+    notes = _midi_to_note_events(midi)
 
-    for event in raw_note_events:
-        # Each event is a tuple: (start_time, end_time, pitch, amplitude, ...)
-        # We take the first 4 fields — extra fields (pitch_bend etc.) are ignored.
-        start_t = float(event[0])
-        end_t   = float(event[1])
-        pitch   = int(event[2])
-        amp     = float(event[3])
-
-        if end_t <= start_t:
-            continue
-        if not (0 <= pitch <= 127):
-            continue
-
-        notes.append(NoteEvent(
-            start_time=start_t,
-            end_time=end_t,
-            pitch=pitch,
-            velocity=amp,
-        ))
-
-    # Sort by start time — downstream stages (fingering solver) expect notes in chronological order.
+    # Sort by start time — downstream stages (fingering solver) expect notes in
+    # chronological order.
     notes.sort(key=lambda n: n.start_time)
 
     logger.info("Extracted %d notes.", len(notes))

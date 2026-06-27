@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <climits>
 #include <iostream>
+#include <utility>
 #include <vector>
 #include <cmath>
 
@@ -122,17 +123,17 @@ EliminationResult eliminate_notes(const std::vector<int>& note_indices, const st
         int note_idx = note_indices[i];
         weights[i] = harmonic_weight(pitches, notes[note_idx].pitch);
 
-        min_fingers[i] = 1;
-        bool all_open = true;
-        for(const auto& node : graph[note_idx]){
-            if(node.position.fret != 0) {
-                all_open = false;
-                break;
-            }
-        }
-        if(all_open && !graph[note_idx].empty()) min_fingers[i] = 0;
-
-        if(graph[note_idx].empty()) min_fingers[i] = 0;
+        // A note costs 0 fingers if it can be played on an open string.
+        // Candidates are sorted by fret ascending, and the voicing built below
+        // uses the lowest-fret candidate (graph[note_idx][0]), so a fret of 0
+        // there means this note is free. The previous logic required *every*
+        // candidate to be open, which over-counted fingers for notes that also
+        // have fretted positions (e.g. G3 = open S3 or fretted elsewhere) and
+        // could make playable chords look unplayable.
+        if(graph[note_idx].empty() || graph[note_idx][0].position.fret == 0)
+            min_fingers[i] = 0;
+        else
+            min_fingers[i] = 1;
     }
 
     int best_weight = -1;

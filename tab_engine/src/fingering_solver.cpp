@@ -8,6 +8,7 @@
 #include <cmath>
 #include <iostream>
 #include <iomanip>
+#include <utility>
 #include <vector>
 
 static constexpr int MAX_CONTEXT_BONUS = 3;
@@ -21,6 +22,10 @@ static int chord_context_bonus(
     const std::vector<ChordLabel>& chord_labels,
     const ChromaResult&            chroma)
 {
+    // No chord context available (e.g. empty audio) — std::clamp below would be
+    // called with hi = -1 (undefined behavior), so bail out early.
+    if (chord_labels.empty()) return 0;
+
     double hop_sec = static_cast<double> (chroma.hop_size) / chroma.sample_rate;
     double t_i = notes[static_cast<size_t>(note_i)].start_time;
     double t_j = notes[static_cast<size_t>(note_j)].start_time;
@@ -62,18 +67,25 @@ std::vector<FingeringChoice> solve_fingering(
     const std::vector<ChordLabel>& chord_labels,
     const ChromaResult&            chroma)
 {
-    const int N = static_cast<int> (surviving.size());
+    // Drop any surviving note that has no playable fret position instead of
+    // fabricating a fake open string {0,0}. Injecting a note the player never
+    // played silently corrupts the tab. In practice the elimination stage
+    // already removes out-of-range notes, so this is a safety net.
+    std::vector<int> playable;
+    playable.reserve(surviving.size());
+    for (int idx : surviving)
+        if (!graph[static_cast<size_t>(idx)].empty())
+            playable.push_back(idx);
+
+    const int N = static_cast<int>(playable.size());
 
     if(N == 0) return {};
 
     std::vector<std::vector<FretPosition>> candidates(static_cast<size_t> (N));
     for(int i = 0; i < N; ++i){
-        int note_idx = surviving[static_cast<size_t> (i)];
+        int note_idx = playable[static_cast<size_t> (i)];
         for(const auto& node : graph[static_cast<size_t> (note_idx)])
             candidates[static_cast<size_t>(i)].push_back(node.position);
-
-        if(candidates[static_cast<size_t> (i)].empty())
-            candidates[static_cast<size_t> (i)].push_back(FretPosition{0,0});
     }
 
     int max_cands = 0;
@@ -95,8 +107,8 @@ std::vector<FingeringChoice> solve_fingering(
         for (int s = 0; s < max_cands; ++s)
             curr_dp[static_cast<size_t>(s)] = INT_MAX;
 
-        int note_i_idx = surviving[static_cast<size_t> (i)];
-        int note_prev_idx = surviving[static_cast<size_t> (i - 1)];
+        int note_i_idx = playable[static_cast<size_t> (i)];
+        int note_prev_idx = playable[static_cast<size_t> (i - 1)];
         
         for(int s = 0; s < ni_cands; ++s){
             const FretPosition& to = candidates[static_cast<size_t>(i)][static_cast<size_t>(s)];
@@ -153,7 +165,7 @@ std::vector<FingeringChoice> solve_fingering(
     result.reserve(static_cast<size_t>(N));
 
     result.push_back(FingeringChoice{
-        surviving[0],
+        playable[0],
         candidates[0][static_cast<size_t>(chosen_states[0])],
         0   // first note has no predecessor — cost = 0
     });
@@ -162,8 +174,8 @@ std::vector<FingeringChoice> solve_fingering(
         const FretPosition& from = candidates[static_cast<size_t>(i-1)][static_cast<size_t>(chosen_states[i-1])];
         const FretPosition& to   = candidates[static_cast<size_t>(i  )][static_cast<size_t>(chosen_states[i  ])];
 
-        int note_prev_idx = surviving[static_cast<size_t>(i-1)];
-        int note_i_idx    = surviving[static_cast<size_t>(i)];
+        int note_prev_idx = playable[static_cast<size_t>(i-1)];
+        int note_i_idx    = playable[static_cast<size_t>(i)];
 
         int raw_cost = bio_cost(from, to);
         int bonus    = chord_context_bonus(from, to,
@@ -175,7 +187,7 @@ std::vector<FingeringChoice> solve_fingering(
         int running_worst = std::max(result.back().worst_cost, edge_cost);
 
         result.push_back(FingeringChoice{
-            surviving[static_cast<size_t>(i)],
+            playable[static_cast<size_t>(i)],
             to,
             running_worst
         });

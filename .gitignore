@@ -20,6 +20,9 @@ env/
 pipeline/models/*.th
 pipeline/models/*.ckpt
 
+# YourMT3 checkpoint cache (git-cloned from HF on first run)
+.mt3_checkpoints/
+
 # ── Audio data ───────────────────────────────────────────────
 data/input/
 data/output/
@@ -27,6 +30,11 @@ data/output/
 # ── C++ build artifacts ──────────────────────────────────────
 tab_engine/build/
 tab_engine/combinred.txt
+
+# ── vcpkg (dependencies installed per-project in manifest mode) ──
+tab_engine/vcpkg_installed/
+vcpkg_installed/
+vcpkg-manifest-install.log
 
 # ── External libraries (vendored, too large for repo) ────────
 tab_engine/include/nlohmann/
@@ -40,6 +48,9 @@ combine.py
 combined.txt
 *.json
 !requirements.txt
+# Build/config manifests must be tracked despite the blanket *.json ignore:
+!tab_engine/vcpkg.json
+!tab_engine/CMakePresets.json
 
 # ── IDE / Editor ─────────────────────────────────────────────
 .vscode/

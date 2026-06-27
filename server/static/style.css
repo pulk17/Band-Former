@@ -1,0 +1,128 @@
+:root {
+  --bg0: #0a0c12;
+  --bg1: #12151f;
+  --panel: rgba(255,255,255,0.045);
+  --panel-strong: rgba(255,255,255,0.08);
+  --line: rgba(255,255,255,0.09);
+  --fg: #eef2f8;
+  --muted: #9aa3b6;
+  --accent: #5ad1c4;
+  --accent2: #f2b76b;
+  --accent3: #c06be8;
+  --grad: linear-gradient(135deg, #5ad1c4, #6b86e8 60%, #c06be8);
+  --shadow: 0 8px 30px rgba(0,0,0,0.45);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0; height: 100%;
+  color: var(--fg);
+  font: 14px/1.45 "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background:
+    radial-gradient(1200px 600px at 80% -10%, rgba(90,209,196,0.10), transparent 60%),
+    radial-gradient(1000px 500px at 0% 110%, rgba(192,107,232,0.10), transparent 55%),
+    var(--bg0);
+}
+body { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+
+.glass {
+  background: var(--panel);
+  backdrop-filter: blur(12px) saturate(120%);
+  border: 1px solid var(--line);
+}
+
+/* ── Top bar ─────────────────────────────────────────────── */
+.topbar {
+  display: flex; align-items: center; gap: 18px;
+  padding: 12px 20px; border-bottom: 1px solid var(--line);
+}
+.brand { font-size: 17px; font-weight: 700; letter-spacing: .3px; }
+.brand .logo { filter: drop-shadow(0 0 8px rgba(90,209,196,.5)); }
+.songpick { display: flex; gap: 8px; }
+.badges { margin-left: auto; display: flex; gap: 10px; }
+.badge {
+  padding: 5px 12px; border-radius: 999px; font-size: 12px; font-weight: 600;
+  color: #0b0e14; background: var(--grad); font-variant-numeric: tabular-nums;
+}
+
+/* ── Controls ────────────────────────────────────────────── */
+select, button, .upload {
+  appearance: none; cursor: pointer;
+  background: var(--panel-strong); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 10px;
+  padding: 8px 13px; font-size: 13px; font-weight: 500;
+  transition: border-color .15s, background .15s, transform .05s;
+}
+button:active { transform: translateY(1px); }
+select:hover, button:hover, .upload:hover { border-color: var(--accent); }
+button:disabled { opacity: .4; cursor: default; }
+
+.toolbar {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 20px; margin: 0; border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+.toolbar .primary {
+  width: 44px; height: 44px; border-radius: 50%; font-size: 16px;
+  color: #06140f; background: var(--grad); border: none; box-shadow: var(--shadow);
+}
+.time { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 96px; }
+#seek { flex: 1; min-width: 160px; accent-color: var(--accent); cursor: pointer; height: 6px; }
+
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.seg button { border: none; border-radius: 0; background: transparent; padding: 8px 12px; }
+.seg button.active { background: var(--grad); color: #06140f; font-weight: 700; }
+.speed { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
+.speed select { padding: 6px 8px; }
+#loopBtn.on, #metroBtn.on { background: var(--accent2); color: #1a1206; border-color: var(--accent2); font-weight: 700; }
+
+.status { padding: 0 20px; color: var(--accent2); font-size: 13px; }
+.status:not(:empty) { padding: 8px 20px; }
+
+/* ── Main / views ────────────────────────────────────────── */
+main { flex: 1; position: relative; overflow: hidden; }
+.view { position: absolute; inset: 0; }
+/* !important so this beats the ID-specificity of `#playerView { display:flex }`
+   — otherwise switching views leaves the player stacked on top (frozen). */
+.view.hidden { display: none !important; }
+
+#playerView { display: flex; }
+#stage { flex: 1; height: 100%; display: block; }
+
+.chordPanel {
+  width: 270px; flex: none; border-left: 1px solid var(--line);
+  padding: 18px; display: flex; flex-direction: column; gap: 10px;
+}
+.nowLabel { color: var(--muted); font-size: 11px; letter-spacing: 2px; }
+.chordName {
+  font-size: 40px; font-weight: 800; line-height: 1;
+  background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.diagram { min-height: 150px; display: flex; justify-content: center; }
+.upNext { margin-top: auto; }
+.upTitle { color: var(--muted); font-size: 11px; letter-spacing: 1.5px; margin-bottom: 8px; }
+.nextChords { display: flex; flex-direction: column; gap: 6px; }
+.nextChip {
+  display: flex; justify-content: space-between; gap: 10px;
+  padding: 7px 11px; border-radius: 9px; background: var(--panel-strong); border: 1px solid var(--line);
+}
+.nextChip .t { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* ── Chords grid view ────────────────────────────────────── */
+.chordGrid {
+  position: absolute; inset: 0; overflow-y: auto;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 14px; padding: 20px; align-content: start;
+}
+.chordCard {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+  padding: 12px; text-align: center; transition: border-color .15s, transform .15s, box-shadow .15s;
+}
+.chordCard .cn { font-size: 18px; font-weight: 700; margin-bottom: 6px; }
+.chordCard .ct { color: var(--muted); font-size: 11px; margin-top: 6px; font-variant-numeric: tabular-nums; }
+.chordCard.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), var(--shadow); transform: translateY(-2px); }
+
+#tabStage { width: 100%; height: 100%; display: block; }
+
+.hint { padding: 8px 20px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--line); }

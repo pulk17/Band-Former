@@ -16,6 +16,22 @@ class BeatResult:
     bpm: float | None = None
 
 
+# Cache the loaded model across calls in one process (warm web-server serving).
+_predictor = None
+
+
+def _get_predictor():
+    global _predictor
+    if _predictor is None:
+        from beat_this.inference import File2Beats
+        _predictor = File2Beats(
+            checkpoint_path="final0",
+            device=str(DEVICE),   # beat_this expects a device string ("cuda"/"cpu")
+            dbn=False,
+        )
+    return _predictor
+
+
 def extract_beats(audio_path: Path | str) -> BeatResult:
     """Detect beat and downbeat positions in an audio file."""
     audio_path = Path(audio_path)
@@ -23,18 +39,9 @@ def extract_beats(audio_path: Path | str) -> BeatResult:
     if not audio_path.exists():
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-    logger.info("Ensuring beat-this weights are downloaded...")
-
-    from beat_this.inference import File2Beats
-
     logger.info("Running beat tracking on '%s' (device: %s)...", audio_path.name, DEVICE)
 
-    predictor = File2Beats(
-        checkpoint_path="final0",
-        device=DEVICE,
-        dbn=False,
-    )
-
+    predictor = _get_predictor()
     beats_raw, downbeats_raw = predictor(str(audio_path))
 
     beats = beats_raw.tolist() if hasattr(beats_raw, "tolist") else list(beats_raw)

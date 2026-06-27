@@ -24,6 +24,27 @@ class SeparationResult:
     source_file: Path
 
 
+# Cache the loaded model so repeated calls in one process (e.g. the web server)
+# don't reload the HTDemucs weights every time. output_dir is re-pointed per call.
+_separator = None
+
+
+def _get_separator(stem_output_dir: Path):
+    global _separator
+    if _separator is None:
+        _separator = Separator(
+            output_dir=str(stem_output_dir),
+            model_file_dir=str(MODEL_CACHE_DIR),
+            log_level=logging.WARNING,
+            output_format="WAV",
+            normalization_threshold=NORMALIZATION_THRESHOLD,
+        )
+        logger.info("Loading model: %s", SEPARATION_MODEL)
+        _separator.load_model(model_filename=f"{SEPARATION_MODEL}.yaml")
+    _separator.output_dir = str(stem_output_dir)
+    return _separator
+
+
 def separate_guitar(audio_path: str | Path) -> SeparationResult:
     """Separate the guitar stem from a full-mix audio file."""
     audio_path = Path(audio_path)
@@ -45,16 +66,7 @@ def separate_guitar(audio_path: str | Path) -> SeparationResult:
 
     start_time = time.time()
 
-    separator = Separator(
-        output_dir=str(stem_output_dir),
-        model_file_dir=str(MODEL_CACHE_DIR),
-        log_level=logging.WARNING,
-        output_format="WAV",
-        normalization_threshold=NORMALIZATION_THRESHOLD,
-    )
-
-    logger.info("Loading model: %s", SEPARATION_MODEL)
-    separator.load_model(model_filename=f"{SEPARATION_MODEL}.yaml")
+    separator = _get_separator(stem_output_dir)
 
     logger.info("Running HTDemucs separation...")
     output_files = separator.separate(str(audio_path))
@@ -62,12 +74,24 @@ def separate_guitar(audio_path: str | Path) -> SeparationResult:
     elapsed = time.time() - start_time
     logger.info("Separation completed in %.1f seconds", elapsed)
 
-    guitar_stem_path = None
-    for file_path in output_files:
-        file_name = Path(file_path).name
-        if "guitar" in file_name.lower():
-            guitar_stem_path = stem_output_dir / file_name
-            break
+    # Prefer a stem explicitly named "guitar"; fall back to "other" (which is
+    # where guitar usually lands in 4-stem models) so a model that names its
+    # stems differently still produces usable output instead of crashing.
+    def _match_stem(keyword: str) -> Path | None:
+        for file_path in output_files:
+            file_name = Path(file_path).name
+            if keyword in file_name.lower():
+                return stem_output_dir / file_name
+        return None
+
+    guitar_stem_path = _match_stem("guitar")
+    if guitar_stem_path is None:
+        guitar_stem_path = _match_stem("other")
+        if guitar_stem_path is not None:
+            logger.warning(
+                "No 'guitar' stem found; falling back to 'other' stem: %s",
+                guitar_stem_path.name,
+            )
 
     if guitar_stem_path is None:
         available = [Path(f).name for f in output_files]

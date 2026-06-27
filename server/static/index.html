@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Band-Former</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="logo">🎸</span> Band-Former</div>
+    <div class="songpick">
+      <select id="jobSelect" title="Processed songs"></select>
+      <label class="upload" title="Upload audio">
+        <input id="fileInput" type="file" accept="audio/*" hidden /> Upload
+      </label>
+    </div>
+    <div class="badges">
+      <span class="badge" id="keyBadge">key —</span>
+      <span class="badge" id="bpmBadge">— bpm</span>
+    </div>
+  </header>
+
+  <div class="toolbar glass">
+    <button id="playBtn" class="primary" disabled>▶</button>
+    <span id="time" class="time">0:00 / 0:00</span>
+    <input id="seek" type="range" min="0" max="1000" value="0" />
+
+    <div class="seg" id="viewSeg" title="View">
+      <button data-view="player" class="active">Player</button>
+      <button data-view="chords">Chords</button>
+      <button data-view="tab">Tab</button>
+    </div>
+
+    <div class="seg" id="contentSeg" title="Show">
+      <button data-content="both" class="active">Both</button>
+      <button data-content="melody">Melody</button>
+      <button data-content="chords">Chords</button>
+      <button data-content="all">All</button>
+    </div>
+
+    <label class="speed">Speed
+      <select id="speedSel">
+        <option value="0.5">0.5×</option>
+        <option value="0.75">0.75×</option>
+        <option value="1" selected>1×</option>
+        <option value="1.25">1.25×</option>
+        <option value="1.5">1.5×</option>
+      </select>
+    </label>
+
+    <button id="loopBtn" title="Set A then B to loop">Loop</button>
+    <button id="metroBtn" title="Metronome">Metro</button>
+  </div>
+
+  <div id="status" class="status"></div>
+
+  <main>
+    <!-- Player: falling notes + live chord panel -->
+    <section id="playerView" class="view">
+      <canvas id="stage"></canvas>
+      <aside class="chordPanel glass">
+        <div class="nowLabel">NOW</div>
+        <div id="chordName" class="chordName">—</div>
+        <div id="chordDiagram" class="diagram"></div>
+        <div class="upNext">
+          <div class="upTitle">Up next</div>
+          <div id="nextChords" class="nextChords"></div>
+        </div>
+      </aside>
+    </section>
+
+    <!-- Chords: full chord chart with diagrams -->
+    <section id="chordsView" class="view hidden">
+      <div id="chordGrid" class="chordGrid"></div>
+    </section>
+
+    <!-- Tab: scrolling melody tablature -->
+    <section id="tabView" class="view hidden">
+      <canvas id="tabStage"></canvas>
+    </section>
+  </main>
+
+  <footer class="hint">
+    Space = play/pause · ← → = seek 5s · drag the timeline to scrub · synced to the Web Audio clock
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
