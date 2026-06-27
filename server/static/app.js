@@ -5,7 +5,8 @@
 
   // ── Data ──────────────────────────────────────────────────────────────────
   let tab = null, allNotes = [], melodyNotes = [], harmonyNotes = [], chords = [], beats = [], duration = 0;
-  let view = "player", content = "both";
+  let view = "player", content = "both", capo = 0, useCapo = false;
+  const voicingOf = (c) => (useCapo && capo > 0 && c.capoVoicing) ? c.capoVoicing : (c.voicing || null);
 
   // ── Web Audio (AudioContext.currentTime is the master clock) ──────────────
   let actx = null, buffer = null, src = null;
@@ -72,6 +73,11 @@
     duration = m.duration_sec || (last ? last.start + last.duration : 0);
     $("keyBadge").textContent = "key " + (m.key || "—");
     $("bpmBadge").textContent = (m.bpm ? Number(m.bpm).toFixed(0) : "—") + " bpm";
+    capo = m.capo || 0;
+    useCapo = capo > 0;
+    $("capoBtn").textContent = capo > 0 ? `Capo ${capo}` : "No capo";
+    $("capoBtn").classList.toggle("on", useCapo);
+    $("capoBtn").disabled = capo === 0;
 
     ctx();
     const ab = await (await fetch(`/api/audio/${id}`)).arrayBuffer();
@@ -134,9 +140,11 @@
       if (!seen.has(c.name)) seen.set(c.name, c);
     }
     for (const c of seen.values()) {
+      const v = voicingOf(c);
+      const shape = (useCapo && capo > 0 && v) ? `<div class="ct">play ${v.name}</div>` : "";
       const d = document.createElement("div");
       d.className = "chordCard"; d.dataset.name = c.name;
-      d.innerHTML = `<div class="cn">${c.name}</div>${chordSVG(c.voicing, 104)}<div class="ct">${count.get(c.name)}×</div>`;
+      d.innerHTML = `<div class="cn">${c.name}</div>${chordSVG(v, 104)}${shape}<div class="ct">${count.get(c.name)}×</div>`;
       d.onclick = () => { const f = chords.find((x) => x.name === c.name); if (f) seekTo(f.start); };
       g.appendChild(d);
     }
@@ -209,8 +217,13 @@
     const cur = chordAt(t);
     $("chordName").textContent = cur ? cur.name : "—";
     const diag = $("chordDiagram");
-    const key = cur ? cur.name : "_";
-    if (diag.dataset.k !== key) { diag.dataset.k = key; diag.innerHTML = cur ? chordSVG(cur.voicing, 150) : ""; }
+    const v = cur ? voicingOf(cur) : null;
+    const key = (cur ? cur.name : "_") + "|" + useCapo;
+    if (diag.dataset.k !== key) {
+      diag.dataset.k = key;
+      const label = (v && useCapo && capo > 0) ? `<div class="shapeName">play ${v.name} · capo ${capo}</div>` : "";
+      diag.innerHTML = v ? label + chordSVG(v, 150) : "";
+    }
     const upcoming = chords.filter((c) => c.start > t).slice(0, 4);
     const nx = $("nextChords");
     const sig = upcoming.map((c) => c.name + c.start.toFixed(1)).join();
@@ -296,6 +309,14 @@
     else { loopA = loopB = null; btn.textContent = "Loop"; btn.classList.remove("on"); }
   };
   $("metroBtn").onclick = () => { metro = !metro; $("metroBtn").classList.toggle("on", metro); };
+  $("capoBtn").onclick = () => {
+    if (capo === 0) return;
+    useCapo = !useCapo;
+    $("capoBtn").textContent = useCapo ? `Capo ${capo}` : "No capo";
+    $("capoBtn").classList.toggle("on", useCapo);
+    buildChordGrid();
+    dirty = true;
+  };
 
   document.addEventListener("keydown", (e) => {
     if (e.code === "Space") { e.preventDefault(); toggle(); }

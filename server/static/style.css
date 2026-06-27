@@ -99,7 +99,8 @@ main { flex: 1; position: relative; overflow: hidden; }
   font-size: 40px; font-weight: 800; line-height: 1;
   background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent;
 }
-.diagram { min-height: 150px; display: flex; justify-content: center; }
+.diagram { min-height: 150px; display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.shapeName { color: var(--accent2); font-size: 13px; font-weight: 600; }
 .upNext { margin-top: auto; }
 .upTitle { color: var(--muted); font-size: 11px; letter-spacing: 1.5px; margin-bottom: 8px; }
 .nextChords { display: flex; flex-direction: column; gap: 6px; }

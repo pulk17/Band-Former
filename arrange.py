@@ -1,15 +1,16 @@
 """Turn the engine's raw tab.json into a *playable* arrangement.
 
 The transcription is faithful but dense — every detected note, including
-overtones and ghost notes. A guitarist wants two things instead:
+overtones and ghost notes. A guitarist wants three things instead:
 
-  • a clean monophonic **melody** line (the lead/riff), and
-  • the **chord changes** with a concrete fingering to play.
+  • a clean monophonic **melody** line (the lead/riff),
+  • the **chord changes**, cleaned of flicker, and
+  • a concrete, *easy* way to **fret each chord** — ideally open shapes, with a
+    single **capo** position chosen so the song's barre chords become open ones.
 
-This module declutters the notes, extracts a skyline melody, tags the remaining
-notes as harmony, and attaches a movable chord voicing to every chord segment.
-The enriched fields are written back into tab.json (under "melody" and each
-chord's "voicing"), leaving the original "notes" intact for an "all notes" view.
+Enriched fields are written back into tab.json:
+  metadata.capo, metadata.num_melody;
+  melody[];  each chord gets voicing (no capo) and capoVoicing (with the capo).
 
 Usage:
     python arrange.py <tab.json>
@@ -24,68 +25,147 @@ from pathlib import Path
 
 NOTE_PC = {"C": 0, "C#": 1, "D": 2, "D#": 3, "E": 4, "F": 5,
            "F#": 6, "G": 7, "G#": 8, "A": 9, "A#": 10, "B": 11}
+PC_NOTE = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
-# Movable E-shape voicings (root barred on the low E string).
-# Six entries, low E -> high E; -1 means the string is muted.
+# Movable E-shape voicings (root barred on the low E string); low E -> high E.
 SHAPES = {
-    "maj":  [0, 2, 2, 1, 0, 0],
-    "min":  [0, 2, 2, 0, 0, 0],
-    "5":    [0, 2, 2, -1, -1, -1],   # power chord
-    "7":    [0, 2, 0, 1, 0, 0],
-    "maj7": [0, 2, 1, 1, 0, 0],
-    "min7": [0, 2, 0, 0, 0, 0],
+    "maj":  [0, 2, 2, 1, 0, 0], "min":  [0, 2, 2, 0, 0, 0], "5": [0, 2, 2, -1, -1, -1],
+    "7":    [0, 2, 0, 1, 0, 0], "maj7": [0, 2, 1, 1, 0, 0], "min7": [0, 2, 0, 0, 0, 0],
     "sus4": [0, 2, 2, 2, 0, 0],
 }
 
-MIN_NOTE_DUR = 0.06   # seconds; shorter notes are treated as ghosts/transients
+# Easy open chords, keyed by (pitch class, quality) -> (shape name, frets low E->high E).
+OPEN_SHAPES = {
+    (0, "maj"): ("C", [-1, 3, 2, 0, 1, 0]),  (2, "maj"): ("D", [-1, -1, 0, 2, 3, 2]),
+    (4, "maj"): ("E", [0, 2, 2, 1, 0, 0]),   (7, "maj"): ("G", [3, 2, 0, 0, 0, 3]),
+    (9, "maj"): ("A", [-1, 0, 2, 2, 2, 0]),
+    (2, "min"): ("Dm", [-1, -1, 0, 2, 3, 1]), (4, "min"): ("Em", [0, 2, 2, 0, 0, 0]),
+    (9, "min"): ("Am", [-1, 0, 2, 2, 1, 0]),
+    (0, "7"): ("C7", [-1, 3, 2, 3, 1, 0]), (2, "7"): ("D7", [-1, -1, 0, 2, 1, 2]),
+    (4, "7"): ("E7", [0, 2, 0, 1, 0, 0]), (7, "7"): ("G7", [3, 2, 0, 0, 0, 1]),
+    (9, "7"): ("A7", [-1, 0, 2, 0, 2, 0]), (11, "7"): ("B7", [-1, 2, 1, 2, 0, 2]),
+    (0, "maj7"): ("Cmaj7", [-1, 3, 2, 0, 0, 0]), (2, "maj7"): ("Dmaj7", [-1, -1, 0, 2, 2, 2]),
+    (4, "maj7"): ("Emaj7", [0, 2, 1, 1, 0, 0]), (5, "maj7"): ("Fmaj7", [-1, -1, 3, 2, 1, 0]),
+    (7, "maj7"): ("Gmaj7", [3, 2, 0, 0, 0, 2]), (9, "maj7"): ("Amaj7", [-1, 0, 2, 1, 2, 0]),
+    (2, "min7"): ("Dm7", [-1, -1, 0, 2, 1, 1]), (4, "min7"): ("Em7", [0, 2, 0, 0, 0, 0]),
+    (9, "min7"): ("Am7", [-1, 0, 2, 0, 1, 0]),
+    (2, "sus4"): ("Dsus4", [-1, -1, 0, 2, 3, 3]), (4, "sus4"): ("Esus4", [0, 2, 2, 2, 0, 0]),
+    (9, "sus4"): ("Asus4", [-1, 0, 2, 2, 3, 0]),
+    (2, "5"): ("D5", [-1, -1, 0, 2, 3, -1]), (4, "5"): ("E5", [0, 2, 2, -1, -1, -1]),
+    (9, "5"): ("A5", [-1, 0, 2, 2, -1, -1]),
+}
+
+MIN_NOTE_DUR = 0.06     # ghost-note cutoff (s)
+MIN_CHORD_DUR = 0.45    # merge chord segments shorter than this
 
 
-def chord_voicing(name: str) -> dict | None:
-    """Return a concrete fingering {baseFret, frets[6]} for a chord label."""
+def _parse(name: str):
     if ":" not in name:
         return None
     root, qual = name.split(":", 1)
     if root not in NOTE_PC or qual not in SHAPES:
         return None
-    base = (NOTE_PC[root] - 4) % 12          # barre fret on the low E string
-    frets = [(-1 if v < 0 else v + base) for v in SHAPES[qual]]   # low E -> high E
-    return {"baseFret": base, "frets": frets}
+    return NOTE_PC[root], qual
 
 
-def declutter(notes: list[dict]) -> list[dict]:
-    """Drop ghost notes and exact-duplicate overlaps."""
-    kept: list[dict] = []
-    seen: dict[tuple, float] = {}
+def barre_voicing(root_pc: int, qual: str, capo: int = 0) -> dict:
+    """Movable E-shape voicing relative to the capo (baseFret is above the capo)."""
+    t = (root_pc - capo) % 12
+    base = (t - 4) % 12
+    frets = [(-1 if v < 0 else v + base) for v in SHAPES[qual]]
+    return {"name": PC_NOTE[t] + ("m" if qual == "min" else "" if qual == "maj" else qual),
+            "frets": frets, "baseFret": base, "open": False}
+
+
+def voicing(root_pc: int, qual: str, capo: int = 0) -> dict:
+    """Best playable shape for a chord at a given capo: open if possible, else barre."""
+    t = (root_pc - capo) % 12
+    if (t, qual) in OPEN_SHAPES:
+        nm, frets = OPEN_SHAPES[(t, qual)]
+        return {"name": nm, "frets": frets, "baseFret": 0, "open": True}
+    return barre_voicing(root_pc, qual, capo)
+
+
+def pick_capo(chords) -> int:
+    """Choose the capo (0..7) that makes the most (frequency-weighted) chords open.
+
+    Power chords are excluded: they're a movable 2-finger shape that's equally
+    easy at any fret, so they shouldn't sway the capo. A mild per-fret penalty
+    breaks near-ties toward a lower, more comfortable capo position.
+    """
+    counts = defaultdict(int)
+    for c in chords:
+        p = _parse(c["name"])
+        if p and p[1] != "5":
+            counts[p] += 1
+    if not counts:
+        return 0
+    best_capo, best_score = 0, -1e9
+    for capo in range(8):
+        cov = sum(n for (pc, q), n in counts.items()
+                  if ((pc - capo) % 12, q) in OPEN_SHAPES)
+        score = cov - 0.5 * capo
+        if score > best_score:
+            best_score, best_capo = score, capo
+    return best_capo
+
+
+def merge_chords(chords):
+    """Collapse same-name neighbours and absorb sub-threshold flicker segments."""
+    out = []
+    for c in chords:
+        if c.get("name") in ("silence", "unknown"):
+            continue
+        if out and out[-1]["name"] == c["name"]:
+            out[-1]["end"] = c["end"]
+        elif out and (c["end"] - c["start"]) < MIN_CHORD_DUR and \
+                (out[-1]["end"] - out[-1]["start"]) >= MIN_CHORD_DUR:
+            out[-1]["end"] = c["end"]           # swallow the brief blip
+        else:
+            out.append(dict(c))
+    # second pass: merge any new same-name adjacencies created above
+    merged = []
+    for c in out:
+        if merged and merged[-1]["name"] == c["name"]:
+            merged[-1]["end"] = c["end"]
+        else:
+            merged.append(c)
+    return merged
+
+
+def declutter(notes):
+    kept, seen = [], set()
     for n in sorted(notes, key=lambda n: (n["start"], -n["pitch"])):
         if n["duration"] < MIN_NOTE_DUR:
             continue
         key = (round(n["start"], 2), n["pitch"])
-        if key in seen:               # same pitch, same onset -> duplicate
+        if key in seen:
             continue
-        seen[key] = n["start"]
+        seen.add(key)
         kept.append(n)
     return kept
 
 
-def extract_melody(notes: list[dict]) -> list[dict]:
-    """Skyline melody: the highest note at each (quantized) onset, made monophonic."""
-    groups: dict[float, list[dict]] = defaultdict(list)
+def extract_melody(notes):
+    """Skyline melody: highest note per quantized onset, made monophonic,
+    with consecutive same-pitch repeats merged."""
+    groups = defaultdict(list)
     for n in notes:
-        key = round(n.get("start_q", n["start"]), 2)
-        groups[key].append(n)
+        groups[round(n.get("start_q", n["start"]), 2)].append(n)
+    line = [max(groups[k], key=lambda n: n["pitch"]) for k in sorted(groups)]
+    line.sort(key=lambda n: n["start"])
 
-    melody = [max(groups[k], key=lambda n: n["pitch"]) for k in sorted(groups)]
-    melody.sort(key=lambda n: n["start"])
-
-    # Trim overlaps so only one melody note sounds at a time.
     out = []
-    for i, n in enumerate(melody):
+    for i, n in enumerate(line):
         dur = n["duration"]
-        if i + 1 < len(melody):
-            gap = melody[i + 1]["start"] - n["start"]
+        if i + 1 < len(line):
+            gap = line[i + 1]["start"] - n["start"]
             if gap > 0:
                 dur = min(dur, gap)
-        out.append({**n, "duration": max(0.05, dur), "melody": True})
+        if out and out[-1]["pitch"] == n["pitch"] and n["start"] - (out[-1]["start"] + out[-1]["duration"]) < 0.08:
+            out[-1]["duration"] = (n["start"] + max(0.05, dur)) - out[-1]["start"]  # tie repeats
+        else:
+            out.append({**n, "duration": max(0.05, dur), "melody": True})
     return out
 
 
@@ -95,18 +175,21 @@ def arrange(tab: dict) -> dict:
 
     melody = extract_melody(clean)
     melody_keys = {(round(n["start"], 3), n["pitch"]) for n in melody}
-
-    # Tag every note as melody or harmony for the "all notes" view.
     for n in notes:
         n["melody"] = (round(n["start"], 3), n["pitch"]) in melody_keys
-
     tab["melody"] = melody
-    for c in tab.get("chords", []):
-        v = chord_voicing(c["name"])
-        if v:
-            c["voicing"] = v
+
+    chords = merge_chords(tab.get("chords", []))
+    capo = pick_capo(chords)
+    for c in chords:
+        p = _parse(c["name"])
+        if p:
+            c["voicing"] = voicing(p[0], p[1], 0)
+            c["capoVoicing"] = voicing(p[0], p[1], capo)
+    tab["chords"] = chords
 
     meta = tab.setdefault("metadata", {})
+    meta["capo"] = capo
     meta["num_melody"] = len(melody)
     meta["num_notes_clean"] = len(clean)
     return tab
@@ -119,9 +202,8 @@ def main() -> None:
     p = Path(sys.argv[1])
     tab = arrange(json.loads(p.read_text()))
     p.write_text(json.dumps(tab, indent=2))
-    print(f"Arranged: {len(tab.get('notes', []))} notes -> "
-          f"{len(tab.get('melody', []))} melody notes, "
-          f"{len(tab.get('chords', []))} chords with voicings")
+    print(f"Arranged: {len(tab.get('notes', []))} notes -> {len(tab['melody'])} melody, "
+          f"{len(tab['chords'])} chords, capo {tab['metadata']['capo']}")
 
 
 if __name__ == "__main__":
