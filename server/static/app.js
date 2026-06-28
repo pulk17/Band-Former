@@ -155,6 +155,7 @@
     $("playBtn").disabled = false;
     buildChordGrid(); buildLearn();
     $("status").textContent = ""; dirty = true;
+    hideOverlay();                                  // ensure the progress window is gone
   }
 
   function fillCapoSelect() {
@@ -204,7 +205,7 @@
   async function poll(id) {
     let s;
     try { s = await (await fetch(`/api/status/${id}`)).json(); }
-    catch (e) { showOverlay("Lost connection", String(e)); return; }
+    catch (e) { setTimeout(() => poll(id), 2000); return; }   // transient blip — keep polling, don't die
     if (s.status === "done") { hideOverlay(); await refreshJobs(id); $("jobSelect").value = id; return loadJob(id); }
     if (s.status === "error") { showOverlay("Processing failed", (s.error || "").split("\n").filter(Boolean).pop() || "unknown error"); return; }
     showOverlay("Processing", s.stage || "Starting...", s.stage);
