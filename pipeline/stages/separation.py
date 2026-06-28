@@ -45,8 +45,35 @@ def _get_separator(stem_output_dir: Path):
     return _separator
 
 
-def separate_guitar(audio_path: str | Path) -> SeparationResult:
-    """Separate the guitar stem from a full-mix audio file."""
+def _build_combined_stem(stem_output_dir: Path, stems: list[Path]) -> Path | None:
+    """Sum the pitched instrument stems (guitar+bass+piano+other) into one WAV."""
+    import numpy as np
+    import soundfile as sf
+    parts = [p for p in stems if any(k in p.name.lower() for k in ("guitar", "bass", "piano", "other"))]
+    if not parts:
+        return None
+    mix, sr = None, None
+    for p in parts:
+        data, s = sf.read(str(p), dtype="float32")
+        if mix is None:
+            mix, sr = data, s
+        else:
+            n = min(len(mix), len(data))
+            mix = mix[:n] + data[:n]
+    peak = float(np.max(np.abs(mix))) or 1.0
+    if peak > 1.0:
+        mix = mix / peak
+    out = stem_output_dir / f"{stem_output_dir.name}_(Combined)_htdemucs_6s.wav"
+    sf.write(str(out), mix, sr)
+    return out
+
+
+def separate_guitar(audio_path: str | Path, instrument: str = "guitar") -> SeparationResult:
+    """Separate a stem from a full mix and return it for transcription.
+
+    htdemucs_6s outputs all six stems (vocals/drums/bass/guitar/piano/other).
+    `instrument` selects which to transcribe; "all" builds one combined
+    instrumental stem (so overlapping notes are quantified once, not per stem)."""
     audio_path = Path(audio_path)
 
     if not audio_path.exists():
@@ -81,8 +108,8 @@ def separate_guitar(audio_path: str | Path) -> SeparationResult:
     logger.info("Separation completed in %.1f seconds", elapsed)
 
     # Discover stems from disk (the return value's shape varies by version and
-    # can be empty even on success). Prefer a "guitar" stem; fall back to "other".
-    stems = sorted(stem_output_dir.glob("*.wav"))
+    # can be empty even on success).
+    stems = [p for p in sorted(stem_output_dir.glob("*.wav")) if "(Combined)" not in p.name]
 
     def _match_stem(keyword: str) -> Path | None:
         for p in stems:
@@ -90,21 +117,28 @@ def separate_guitar(audio_path: str | Path) -> SeparationResult:
                 return p
         return None
 
-    guitar_stem_path = _match_stem("guitar")
-    if guitar_stem_path is None:
-        guitar_stem_path = _match_stem("other")
-        if guitar_stem_path is not None:
-            logger.warning("No 'guitar' stem; falling back to 'other': %s", guitar_stem_path.name)
-
-    if guitar_stem_path is None:
-        raise RuntimeError(
-            f"Separation produced no usable stem for '{audio_path.name}'. "
-            f"Files written: {[p.name for p in stems]} "
-            f"(separator returned {len(output_files or [])} items)."
-        )
+    if instrument == "all":
+        # One combined instrumental stem (guitar+bass+piano+other) so overlapping
+        # notes across instruments are transcribed once, and chord detection sees
+        # the full harmony. Vocals + drums are excluded (handled separately / no pitch).
+        guitar_stem_path = _build_combined_stem(stem_output_dir, stems)
+        if guitar_stem_path is None:
+            raise RuntimeError(f"Could not build combined stem for '{audio_path.name}'.")
+    else:
+        guitar_stem_path = _match_stem(instrument)
+        if guitar_stem_path is None and instrument == "guitar":
+            guitar_stem_path = _match_stem("other")
+            if guitar_stem_path is not None:
+                logger.warning("No 'guitar' stem; falling back to 'other': %s", guitar_stem_path.name)
+        if guitar_stem_path is None:
+            raise RuntimeError(
+                f"No '{instrument}' stem for '{audio_path.name}'. "
+                f"Files written: {[p.name for p in stems]} "
+                f"(separator returned {len(output_files or [])} items)."
+            )
 
     size_mb = guitar_stem_path.stat().st_size / (1024 * 1024)
-    logger.info("Guitar stem: %s (%.1f MB)", guitar_stem_path.name, size_mb)
+    logger.info("Selected stem (%s): %s (%.1f MB)", instrument, guitar_stem_path.name, size_mb)
 
     return SeparationResult(
         guitar_stem_path=guitar_stem_path,

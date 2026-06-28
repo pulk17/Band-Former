@@ -139,7 +139,7 @@
   $("fileInput").addEventListener("change", async (e) => {
     const f = e.target.files[0]; if (!f) return;
     showOverlay("Uploading…", f.name);
-    const fd = new FormData(); fd.append("file", f);
+    const fd = new FormData(); fd.append("file", f); fd.append("instrument", $("instSel").value);
     const r = await fetch("/api/transcribe", { method: "POST", body: fd });
     e.target.value = "";
     if (!r.ok) { showOverlay("Upload failed", await r.text()); return; }
@@ -149,7 +149,7 @@
     const url = $("ytInput").value.trim(); if (!url) return;
     showOverlay("Fetching from YouTube…", url);
     const r = await fetch("/api/transcribe/youtube", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }),
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url, instrument: $("instSel").value }),
     });
     if (!r.ok) { let d = ""; try { d = (await r.json()).detail; } catch (e) {} showOverlay("YouTube failed", d || `HTTP ${r.status}`); return; }
     $("ytInput").value = "";

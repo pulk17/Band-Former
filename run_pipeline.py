@@ -45,7 +45,7 @@ def find_tab_engine_binary() -> Path | None:
     return None
 
 
-def process_audio(audio_path: Path | str) -> Path:
+def process_audio(audio_path: Path | str, instrument: str = "guitar") -> Path:
     """Run the full pipeline on one file and return its output directory.
 
     Raises on a fatal stage failure. Safe to call in-process: the web server
@@ -60,7 +60,7 @@ def process_audio(audio_path: Path | str) -> Path:
 
     # ── Stage 1: Source Separation (required) ─────────────────────────────────
     print("=" * 60 + "\n  STAGE 1 — Source Separation\n" + "=" * 60)
-    separation_result = separate_guitar(audio_path)
+    separation_result = separate_guitar(audio_path, instrument)
     out_dir = separation_result.guitar_stem_path.parent
     print(f"\n  ✓ Guitar stem : {separation_result.guitar_stem_path}")
     print(f"  ✓ Elapsed     : {separation_result.duration_seconds:.1f} s\n")
@@ -117,6 +117,7 @@ def process_audio(audio_path: Path | str) -> Path:
         try:
             from arrange import arrange
             data = arrange(json.loads(tab_json.read_text()))
+            data.setdefault("metadata", {})["instrument"] = instrument
             tab_json.write_text(json.dumps(data, indent=2))
             print(f"  ✓ Arrangement: {data['metadata'].get('num_melody', 0)} "
                   f"melody notes + {len(data.get('chords', []))} chords")

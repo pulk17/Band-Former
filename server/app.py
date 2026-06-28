@@ -70,7 +70,17 @@ class Job:
 
 _jobs: dict[str, Job] = {}
 _lock = threading.Lock()
-_queue: "queue.Queue[tuple[str, Path]]" = queue.Queue()
+_queue: "queue.Queue[tuple[str, Path, str]]" = queue.Queue()
+
+
+def _processed_instrument(stem: str) -> str | None:
+    tab = OUTPUT_DIR / stem / "tab.json"
+    if not tab.exists():
+        return None
+    try:
+        return (json.loads(tab.read_text()).get("metadata") or {}).get("instrument", "guitar")
+    except Exception:
+        return "guitar"
 
 
 class MusicManager:
@@ -149,12 +159,12 @@ def _worker() -> None:
     ML models loaded by the pipeline stages stay warm across uploads."""
     from run_pipeline import process_audio   # imported here so server startup stays light
     while True:
-        job_id, audio_path = _queue.get()
+        job_id, audio_path, instrument = _queue.get()
         with _lock:
             _jobs[job_id].status = "processing"
-            _jobs[job_id].stage = "separation → beats → transcription → engine"
+            _jobs[job_id].stage = f"separating {instrument} → beats → transcribing → engine"
         try:
-            process_audio(audio_path)
+            process_audio(audio_path, instrument)
             tab = _output_dir_for(audio_path.stem) / "tab.json"
             with _lock:
                 if tab.exists():
@@ -172,6 +182,16 @@ def _worker() -> None:
 def _startup() -> None:
     INPUT_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        import torch
+        if torch.cuda.is_available():
+            print(f"[band-former] GPU: {torch.cuda.get_device_name(0)} · {sys.executable}")
+        else:
+            print("[band-former] WARNING: CUDA not available — transcription will be SLOW (CPU).")
+            print(f"[band-former] python in use: {sys.executable}")
+            print("[band-former] launch with the venv: .venv\\Scripts\\python -m uvicorn server.app:app --port 8000")
+    except Exception:
+        pass
     _seed_existing_jobs()
     threading.Thread(target=_worker, daemon=True).start()
 
@@ -182,7 +202,7 @@ def index() -> FileResponse:
 
 
 @app.post("/api/transcribe")
-async def transcribe(file: UploadFile = File(...)) -> JSONResponse:
+async def transcribe(file: UploadFile = File(...), instrument: str = Form("guitar")) -> JSONResponse:
     suffix = Path(file.filename or "upload.mp3").suffix.lower()
     if suffix not in AUDIO_EXTS:
         raise HTTPException(400, f"Unsupported audio type: {suffix}")
@@ -192,23 +212,21 @@ async def transcribe(file: UploadFile = File(...)) -> JSONResponse:
     dest.write_bytes(await file.read())
 
     job_id = stem
-    if music_manager.is_processed(stem):
-        # Already processed
+    if _processed_instrument(stem) == instrument:   # cached AND same instrument
         with _lock:
             if job_id not in _jobs:
                 _jobs[job_id] = Job(id=job_id, name=stem, song_stem=stem, status="done", stage="complete")
         return JSONResponse({"job_id": job_id})
 
-    job = Job(id=job_id, name=stem, song_stem=stem)
     with _lock:
-        _jobs[job_id] = job
-
-    _queue.put((job_id, dest))
+        _jobs[job_id] = Job(id=job_id, name=stem, song_stem=stem)
+    _queue.put((job_id, dest, instrument))
     return JSONResponse({"job_id": job_id})
 
 
 class YouTubeRequest(BaseModel):
     url: str
+    instrument: str = "guitar"
 
 @app.post("/api/transcribe/youtube")
 def transcribe_youtube(req: YouTubeRequest) -> JSONResponse:
@@ -216,11 +234,11 @@ def transcribe_youtube(req: YouTubeRequest) -> JSONResponse:
         info = music_manager.get_youtube_info(req.url)
     except Exception as e:
         raise HTTPException(400, f"Could not fetch YouTube info: {e}")
-    
+
     stem = info['id']
     job_id = stem
 
-    if music_manager.is_processed(stem):
+    if _processed_instrument(stem) == req.instrument:
         with _lock:
             if job_id not in _jobs:
                 _jobs[job_id] = Job(id=job_id, name=info.get('title', stem), song_stem=stem, status="done", stage="complete")
@@ -236,7 +254,7 @@ def transcribe_youtube(req: YouTubeRequest) -> JSONResponse:
     with _lock:
         _jobs[job_id] = job
 
-    _queue.put((job_id, dest))
+    _queue.put((job_id, dest, req.instrument))
     return JSONResponse({"job_id": job_id})
 
 
