@@ -98,10 +98,11 @@ class MusicManager:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             return ydl.extract_info(url, download=False)
 
-    def download_youtube(self, url: str) -> Path:
+    def download_youtube(self, url: str, stem: str) -> Path:
+        """Download bestaudio -> {stem}.mp3 (readable title-based name)."""
         ydl_opts = {
             'format': 'bestaudio/best',
-            'outtmpl': str(self.input_dir / '%(id)s.%(ext)s'),
+            'outtmpl': str(self.input_dir / f'{stem}.%(ext)s'),
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
@@ -109,10 +110,11 @@ class MusicManager:
             }],
             'quiet': True,
             'noplaylist': True,
+            'overwrites': True,
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            return self.input_dir / f"{info['id']}.mp3"
+            ydl.extract_info(url, download=True)
+        return self.input_dir / f"{stem}.mp3"
 
 music_manager = MusicManager(INPUT_DIR, OUTPUT_DIR)
 
@@ -247,26 +249,26 @@ class YouTubeRequest(BaseModel):
 @app.post("/api/transcribe/youtube")
 def transcribe_youtube(req: YouTubeRequest) -> JSONResponse:
     try:
-        info = music_manager.get_youtube_info(req.url)
+        info = music_manager.get_youtube_info(req.url)   # metadata only (no download)
     except Exception as e:
         raise HTTPException(400, f"Could not fetch YouTube info: {e}")
 
-    stem = info['id']
+    title = info.get('title') or info.get('id') or "youtube"
+    stem = _safe_stem(title)                  # readable, title-based id used everywhere
     job_id = stem
 
     if _processed_instrument(stem) == req.instrument:
         with _lock:
             if job_id not in _jobs:
-                _jobs[job_id] = Job(id=job_id, name=info.get('title', stem), song_stem=stem, status="done", stage="complete")
+                _jobs[job_id] = Job(id=job_id, name=title, song_stem=stem, status="done", stage="complete")
         return JSONResponse({"job_id": job_id})
 
-    # Download it
     try:
-        dest = music_manager.download_youtube(req.url)
+        dest = music_manager.download_youtube(req.url, stem)
     except Exception as e:
         raise HTTPException(500, f"Download failed: {e}")
 
-    job = Job(id=job_id, name=info.get('title', stem), song_stem=stem)
+    job = Job(id=job_id, name=title, song_stem=stem)
     with _lock:
         _jobs[job_id] = job
 
