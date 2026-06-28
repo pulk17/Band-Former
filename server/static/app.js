@@ -123,8 +123,8 @@
     for (let i = 0; i < ST; i++) {
       const x = padX + i * st, val = frets[i];
       if (val < 0) s += `<text x="${x}" y="${padT - 5}" fill="#e06b6b" font-size="${size * 0.12}" text-anchor="middle">×</text>`;
-      else if (val === 0) s += `<circle cx="${x}" cy="${padT - size * 0.075}" r="${size * 0.045}" fill="none" stroke="#5ad1c4" stroke-width="1.5"/>`;
-      else { const pos = open ? val : (val - startFret + 1); const y = padT + (pos - 0.5) * fy; s += `<circle cx="${x}" cy="${y}" r="${size * 0.072}" fill="#5ad1c4"/>`; }
+      else if (val === 0) s += `<circle cx="${x}" cy="${padT - size * 0.075}" r="${size * 0.045}" fill="none" stroke="#ff6a3d" stroke-width="1.5"/>`;
+      else { const pos = open ? val : (val - startFret + 1); const y = padT + (pos - 0.5) * fy; s += `<circle cx="${x}" cy="${y}" r="${size * 0.072}" fill="#ff6a3d"/>`; }
     }
     return s + "</svg>";
   }
@@ -141,7 +141,7 @@
     }
     for (const c of seen.values()) {
       const v = voicingOf(c);
-      const shape = (useCapo && capo > 0 && v) ? `<div class="ct">play ${v.name}</div>` : "";
+      const shape = (useCapo && capo > 0 && v) ? `<div class="play">play ${v.name}</div>` : "";
       const d = document.createElement("div");
       d.className = "chordCard"; d.dataset.name = c.name;
       d.innerHTML = `<div class="cn">${c.name}</div>${chordSVG(v, 104)}${shape}<div class="ct">${count.get(c.name)}×</div>`;
@@ -152,31 +152,49 @@
 
   // ── Helpers ─────────────────────────────────────────────────────────────────
   const LABELS = ["e", "B", "G", "D", "A", "E"];
-  const PPS = 150, NOW = 0.22;
+  const COLORS = ["#ff6a3d", "#ff9f1c", "#ffd23f", "#4cc97f", "#3aa7ff", "#a06bff"]; // e B G D A E
+  const NOWLINE = "#ffffff", INK = "#11131a";
+  const PPS = 150, NOW = 0.24;
   const fmt = (s) => { s = Math.max(0, s | 0); return (s / 60 | 0) + ":" + String(s % 60).padStart(2, "0"); };
   function lower(arr, t) { let lo = 0, hi = arr.length; while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m].start < t) lo = m + 1; else hi = m; } return lo; }
   function chordAt(t) { let cur = null; for (const c of chords) { if (c.start <= t && t < c.end) cur = c; if (c.start > t) break; } return cur; }
   function roundRect(c, x, y, w, h, r) { c.beginPath(); c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r); c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath(); }
-  function fit(canvas, c) {
-    const dpr = window.devicePixelRatio || 1, w = canvas.clientWidth, h = canvas.clientHeight;
-    const ww = (w * dpr) | 0, hh = (h * dpr) | 0;
-    if (canvas.width !== ww || canvas.height !== hh) { canvas.width = ww; canvas.height = hh; } // only on change
-    c.setTransform(dpr, 0, 0, dpr, 0, 0);
-    return [w, h];
+
+  // Robust canvas sizing: a ResizeObserver sets the backing store from the
+  // element's real box only when it changes — never a per-frame clientWidth
+  // read (which can momentarily be 0 and corrupt the transform / now-line).
+  const csize = new Map();
+  function watchCanvas(cv) {
+    const apply = () => {
+      const dpr = window.devicePixelRatio || 1;
+      const r = cv.getBoundingClientRect();
+      const w = Math.max(1, Math.round(r.width)), h = Math.max(1, Math.round(r.height));
+      const bw = Math.round(w * dpr), bh = Math.round(h * dpr);
+      if (cv.width !== bw || cv.height !== bh) { cv.width = bw; cv.height = bh; }
+      csize.set(cv, { w, h, dpr });
+      dirty = true;
+    };
+    new ResizeObserver(apply).observe(cv);
+    apply();
+  }
+  function frameSize(cv, c) {
+    const s = csize.get(cv) || { w: 1, h: 1, dpr: 1 };
+    c.setTransform(s.dpr, 0, 0, s.dpr, 0, 0);
+    return [s.w, s.h];
   }
 
   // ── Player canvas ─────────────────────────────────────────────────────────
   function drawPlayer(t) {
-    const [W, H] = fit(stage, sx);
+    const [W, H] = frameSize(stage, sx);
     sx.clearRect(0, 0, W, H);
-    const nowX = W * NOW, ribbon = 34, top = ribbon, laneH = (H - ribbon) / 6;
+    const nowX = Math.round(W * NOW), ribbon = 36, top = ribbon, laneH = (H - ribbon) / 6;
 
     // beat grid
-    if (beats.length) { sx.strokeStyle = "rgba(255,255,255,0.05)"; for (const b of beats) { const x = nowX + (b - t) * PPS; if (x < 0 || x > W) continue; sx.beginPath(); sx.moveTo(x, top); sx.lineTo(x, H); sx.stroke(); } }
+    if (beats.length) { sx.strokeStyle = "rgba(255,255,255,0.045)"; for (const b of beats) { const x = nowX + (b - t) * PPS; if (x < 0 || x > W) continue; sx.beginPath(); sx.moveTo(x, top); sx.lineTo(x, H); sx.stroke(); } }
 
     // lanes
-    sx.strokeStyle = "rgba(255,255,255,0.09)"; sx.fillStyle = "#9aa3b6"; sx.font = "11px system-ui"; sx.textBaseline = "middle"; sx.textAlign = "left";
-    for (let s = 0; s < 6; s++) { const y = top + laneH * (s + 0.5); sx.beginPath(); sx.moveTo(0, y); sx.lineTo(W, y); sx.stroke(); sx.fillText(LABELS[s], 6, y); }
+    sx.lineWidth = 1; sx.strokeStyle = "rgba(255,255,255,0.07)"; sx.font = "11px system-ui"; sx.textBaseline = "middle"; sx.textAlign = "left";
+    for (let s = 0; s < 6; s++) { const y = top + laneH * (s + 0.5); sx.beginPath(); sx.moveTo(0, y); sx.lineTo(W, y); sx.stroke(); sx.fillStyle = COLORS[s]; sx.globalAlpha = 0.65; sx.fillText(LABELS[s], 7, y); sx.globalAlpha = 1; }
 
     // chord ribbon
     const tStart = t - nowX / PPS, tEnd = t + (W - nowX) / PPS;
@@ -185,16 +203,16 @@
       if (c.end < tStart || c.start > tEnd) continue;
       const x1 = nowX + (c.start - t) * PPS, x2 = nowX + (c.end - t) * PPS;
       const active = c.start <= t && t < c.end;
-      sx.fillStyle = active ? "rgba(90,209,196,0.22)" : "rgba(255,255,255,0.04)";
+      sx.fillStyle = active ? "rgba(255,106,61,0.20)" : "rgba(255,255,255,0.035)";
       sx.fillRect(x1, 0, Math.max(2, x2 - x1), ribbon);
-      sx.fillStyle = active ? "#5ad1c4" : "#9aa3b6";
+      sx.fillStyle = active ? "#ff8a63" : "#8f99ab";
       if (x2 - x1 > 26) sx.fillText(c.name, (Math.max(x1, 0) + Math.min(x2, W)) / 2, ribbon / 2);
     }
-    sx.strokeStyle = "rgba(255,255,255,0.12)"; sx.beginPath(); sx.moveTo(0, ribbon); sx.lineTo(W, ribbon); sx.stroke();
+    sx.strokeStyle = "rgba(255,255,255,0.10)"; sx.beginPath(); sx.moveTo(0, ribbon); sx.lineTo(W, ribbon); sx.stroke();
 
     // notes
     let list = content === "melody" ? melodyNotes : content === "chords" ? harmonyNotes : allNotes;
-    sx.font = "bold 11px system-ui";
+    sx.font = "bold 11px system-ui"; sx.textAlign = "center";
     for (let i = Math.max(0, lower(list, tStart) - 30); i < list.length; i++) {
       const n = list[i]; if (n.start > tEnd) break; if (n.start + n.duration < tStart) continue;
       const s = n.string - 1; if (s < 0 || s > 5) continue;
@@ -202,16 +220,16 @@
       const y = top + laneH * (s + 0.5), h = laneH * 0.6;
       const active = n.start <= t && t <= n.start + n.duration;
       const mel = n.melody;
-      sx.globalAlpha = active ? 1 : (mel ? 0.92 : 0.4);
-      sx.fillStyle = active ? "#ffffff" : (mel ? "#5ad1c4" : "#6b86e8");
+      sx.globalAlpha = active ? 1 : (mel ? 0.95 : 0.3);
+      sx.fillStyle = active ? "#ffffff" : COLORS[s];
       roundRect(sx, x, y - h / 2, w, h, 4); sx.fill();
       sx.globalAlpha = 1;
-      if (active || mel) { sx.fillStyle = active ? "#06140f" : "#06140f"; sx.fillText(String(n.fret), x + Math.min(w / 2, 10), y); }
+      if ((active || mel) && w > 13) { sx.fillStyle = INK; sx.fillText(String(n.fret), x + Math.min(w / 2, 11), y); }
     }
     sx.textAlign = "left";
 
     // now-line
-    sx.strokeStyle = "#f2b76b"; sx.lineWidth = 2; sx.beginPath(); sx.moveTo(nowX, 0); sx.lineTo(nowX, H); sx.stroke(); sx.lineWidth = 1;
+    sx.strokeStyle = NOWLINE; sx.lineWidth = 2; sx.beginPath(); sx.moveTo(nowX, 0); sx.lineTo(nowX, H); sx.stroke(); sx.lineWidth = 1;
 
     // chord panel
     const cur = chordAt(t);
@@ -221,7 +239,7 @@
     const key = (cur ? cur.name : "_") + "|" + useCapo;
     if (diag.dataset.k !== key) {
       diag.dataset.k = key;
-      const label = (v && useCapo && capo > 0) ? `<div class="shapeName">play ${v.name} · capo ${capo}</div>` : "";
+      const label = (v && useCapo && capo > 0) ? `<div class="shapeName">play <b>${v.name}</b> · capo ${capo}</div>` : "";
       diag.innerHTML = v ? label + chordSVG(v, 150) : "";
     }
     const upcoming = chords.filter((c) => c.start > t).slice(0, 4);
@@ -229,30 +247,35 @@
     const sig = upcoming.map((c) => c.name + c.start.toFixed(1)).join();
     if (nx.dataset.sig !== sig) {
       nx.dataset.sig = sig;
-      nx.innerHTML = upcoming.map((c) => `<div class="nextChip"><span>${c.name}</span><span class="t">${fmt(c.start)}</span></div>`).join("");
+      nx.innerHTML = upcoming.map((c) => `<div class="nextChip"><b>${c.name}</b><span class="t">${fmt(c.start)}</span></div>`).join("");
     }
   }
 
   // ── Tab (scrolling melody tablature) ─────────────────────────────────────────
   function drawTab(t) {
-    const [W, H] = fit(tabStage, tx);
+    const [W, H] = frameSize(tabStage, tx);
     tx.clearRect(0, 0, W, H);
-    const nowX = W * NOW, pad = 40, laneH = (H - 2 * pad) / 6;
-    tx.strokeStyle = "rgba(255,255,255,0.14)"; tx.fillStyle = "#9aa3b6"; tx.font = "13px ui-monospace, monospace"; tx.textBaseline = "middle";
-    for (let s = 0; s < 6; s++) { const y = pad + laneH * (s + 0.5); tx.beginPath(); tx.moveTo(0, y); tx.lineTo(W, y); tx.stroke(); tx.textAlign = "left"; tx.fillText(LABELS[s], 8, y); }
+    const nowX = Math.round(W * NOW), pad = 44, laneH = (H - 2 * pad) / 6;
+    tx.lineWidth = 1; tx.font = "13px ui-monospace, monospace"; tx.textBaseline = "middle";
+    for (let s = 0; s < 6; s++) {
+      const y = pad + laneH * (s + 0.5);
+      tx.strokeStyle = "rgba(255,255,255,0.12)"; tx.beginPath(); tx.moveTo(0, y); tx.lineTo(W, y); tx.stroke();
+      tx.textAlign = "left"; tx.fillStyle = COLORS[s]; tx.globalAlpha = 0.7; tx.fillText(LABELS[s], 9, y); tx.globalAlpha = 1;
+    }
     // measure bars
-    if (beats.length) { tx.strokeStyle = "rgba(255,255,255,0.07)"; beats.forEach((b, i) => { if (i % 4) return; const x = nowX + (b - t) * PPS; if (x < 0 || x > W) return; tx.beginPath(); tx.moveTo(x, pad); tx.lineTo(x, H - pad); tx.stroke(); }); }
+    if (beats.length) { tx.strokeStyle = "rgba(255,255,255,0.06)"; beats.forEach((b, i) => { if (i % 4) return; const x = nowX + (b - t) * PPS; if (x < 0 || x > W) return; tx.beginPath(); tx.moveTo(x, pad); tx.lineTo(x, H - pad); tx.stroke(); }); }
     const tStart = t - nowX / PPS, tEnd = t + (W - nowX) / PPS;
-    tx.font = "bold 15px ui-monospace, monospace"; tx.textAlign = "center";
+    tx.font = "bold 16px ui-monospace, monospace"; tx.textAlign = "center";
     for (let i = Math.max(0, lower(melodyNotes, tStart) - 6); i < melodyNotes.length; i++) {
       const n = melodyNotes[i]; if (n.start > tEnd) break; if (n.start < tStart - 1) continue;
-      const x = nowX + (n.start - t) * PPS, y = pad + laneH * (n.string - 0.5);
+      const s = n.string - 1; if (s < 0 || s > 5) continue;
+      const x = nowX + (n.start - t) * PPS, y = pad + laneH * (s + 0.5);
       const active = n.start <= t && t <= n.start + n.duration;
-      tx.fillStyle = active ? "#ffffff" : "#5ad1c4";
+      tx.fillStyle = active ? "#ffffff" : COLORS[s];
       tx.fillText(String(n.fret), x, y);
     }
     tx.textAlign = "left";
-    tx.strokeStyle = "#f2b76b"; tx.lineWidth = 2; tx.beginPath(); tx.moveTo(nowX, pad); tx.lineTo(nowX, H - pad); tx.stroke(); tx.lineWidth = 1;
+    tx.strokeStyle = NOWLINE; tx.lineWidth = 2; tx.beginPath(); tx.moveTo(nowX, pad - 8); tx.lineTo(nowX, H - pad + 8); tx.stroke(); tx.lineWidth = 1;
   }
 
   // ── Chords grid highlight ────────────────────────────────────────────────────
@@ -268,7 +291,9 @@
   function frame() {
     requestAnimationFrame(frame);
     if (!tab) return;
-    const t = songTime();
+    // Compensate for audio output latency so the sounding note sits on the line.
+    const lat = (actx && playing) ? (actx.outputLatency || actx.baseLatency || 0) * rate : 0;
+    const t = songTime() - lat;
     // loop
     if (playing && loopA != null && loopB != null && t >= loopB) { seekTo(loopA); }
     // metronome
@@ -325,6 +350,8 @@
   });
 
   async function init() {
+    watchCanvas(stage);
+    watchCanvas(tabStage);
     requestAnimationFrame(frame);
     const jobs = await refreshJobs();
     const done = jobs.find((j) => j.status === "done");
