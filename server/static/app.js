@@ -2,9 +2,13 @@
   const $ = (id) => document.getElementById(id);
   const stage = $("stage"), sx = stage.getContext("2d");
   const tabStage = $("tabStage"), tx = tabStage.getContext("2d");
+  const vocalStage = $("vocalStage"), vc = vocalStage.getContext("2d");
+  const PLAY_ICON = '<svg width="16" height="16" viewBox="0 0 16 16"><path d="M4 3l9 5-9 5z" fill="currentColor"/></svg>';
+  const PAUSE_ICON = '<svg width="16" height="16" viewBox="0 0 16 16"><rect x="4" y="3" width="3" height="10" rx="1" fill="currentColor"/><rect x="9" y="3" width="3" height="10" rx="1" fill="currentColor"/></svg>';
 
   // ── Data ──────────────────────────────────────────────────────────────────
   let tab = null, allNotes = [], melodyNotes = [], harmonyNotes = [], chords = [], beats = [], duration = 0;
+  let vocals = [], vlo = 48, vhi = 72;
   let view = "player", content = "both", capo = 0, useCapo = false;
   const voicingOf = (c) => (useCapo && capo > 0 && c.capoVoicing) ? c.capoVoicing : (c.voicing || null);
 
@@ -29,9 +33,9 @@
     src.onended = () => { if (playing && songTime() >= duration - 0.06) { pause(); paused = 0; } };
     src.start(0, off);
     t0ctx = actx.currentTime; t0song = off; playing = true; metroIdx = 0;
-    $("playBtn").textContent = "⏸";
+    $("playBtn").innerHTML = PAUSE_ICON;
   }
-  function pause() { if (!playing) return; paused = songTime(); playing = false; stopSrc(); $("playBtn").textContent = "▶"; dirty = true; }
+  function pause() { if (!playing) return; paused = songTime(); playing = false; stopSrc(); $("playBtn").innerHTML = PLAY_ICON; dirty = true; }
   const toggle = () => { if (buffer) (playing ? pause() : play(paused)); };
   const seekTo = (t) => { t = Math.max(0, Math.min(t, duration)); if (playing) play(t); else { paused = t; dirty = true; } };
 
@@ -68,6 +72,13 @@
     harmonyNotes = allNotes.filter((n) => !n.melody);
     chords = (tab.chords || []).slice().sort((a, b) => a.start - b.start);
     beats = tab.beats || [];
+    vocals = (tab.vocals || []).slice().sort((a, b) => a.start - b.start);
+    if (vocals.length) {
+      const ps = vocals.map((n) => n.pitch);
+      vlo = Math.min(...ps) - 2; vhi = Math.max(...ps) + 2;
+    }
+    const vbtn = $("viewSeg").querySelector('[data-view=vocals]');
+    if (vbtn) vbtn.style.display = vocals.length ? "" : "none";
     const m = tab.metadata || {};
     const last = allNotes.length ? allNotes[allNotes.length - 1] : null;
     duration = m.duration_sec || (last ? last.start + last.duration : 0);
@@ -168,7 +179,8 @@
     const apply = () => {
       const dpr = window.devicePixelRatio || 1;
       const r = cv.getBoundingClientRect();
-      const w = Math.max(1, Math.round(r.width)), h = Math.max(1, Math.round(r.height));
+      const w = Math.min(8000, Math.max(1, Math.round(r.width)));   // clamp guards a sizing feedback loop
+      const h = Math.min(8000, Math.max(1, Math.round(r.height)));
       const bw = Math.round(w * dpr), bh = Math.round(h * dpr);
       if (cv.width !== bw || cv.height !== bh) { cv.width = bw; cv.height = bh; }
       csize.set(cv, { w, h, dpr });
@@ -278,6 +290,49 @@
     tx.strokeStyle = NOWLINE; tx.lineWidth = 2; tx.beginPath(); tx.moveTo(nowX, pad - 8); tx.lineTo(nowX, H - pad + 8); tx.stroke(); tx.lineWidth = 1;
   }
 
+  // ── Vocals (pitch meter / piano-roll) ────────────────────────────────────────
+  function drawVocals(t) {
+    const [W, H] = frameSize(vocalStage, vc);
+    vc.clearRect(0, 0, W, H);
+    if (!vocals.length) {
+      vc.fillStyle = "#8f99ab"; vc.font = "14px system-ui"; vc.textAlign = "center"; vc.textBaseline = "middle";
+      vc.fillText("No vocals detected for this song.", W / 2, H / 2); vc.textAlign = "left"; return;
+    }
+    const nowX = Math.round(W * NOW), padT = 14, padB = 14;
+    const span = Math.max(1, vhi - vlo);
+    const yOf = (p) => padT + (H - padT - padB) * (1 - (p - vlo) / span);
+    const noteH = Math.min(20, Math.max(7, (H - padT - padB) / span * 0.85));
+    const tStart = t - nowX / PPS, tEnd = t + (W - nowX) / PPS;
+
+    // octave reference lines (each C), labelled
+    vc.font = "10px system-ui"; vc.textBaseline = "middle";
+    for (let p = Math.ceil(vlo / 12) * 12; p <= vhi; p += 12) {
+      const y = yOf(p);
+      vc.strokeStyle = "rgba(255,255,255,0.08)"; vc.beginPath(); vc.moveTo(0, y); vc.lineTo(W, y); vc.stroke();
+      vc.fillStyle = "#8f99ab"; vc.textAlign = "left"; vc.fillText("C" + (p / 12 - 1), 6, y);
+    }
+    // beat grid
+    if (beats.length) { vc.strokeStyle = "rgba(255,255,255,0.04)"; for (const b of beats) { const x = nowX + (b - t) * PPS; if (x < 0 || x > W) continue; vc.beginPath(); vc.moveTo(x, padT); vc.lineTo(x, H - padB); vc.stroke(); } }
+
+    // notes
+    vc.font = "bold 10px system-ui"; vc.textAlign = "center";
+    let curName = null;
+    for (let i = Math.max(0, lower(vocals, tStart) - 10); i < vocals.length; i++) {
+      const n = vocals[i]; if (n.start > tEnd) break; if (n.start + n.duration < tStart) continue;
+      const x = nowX + (n.start - t) * PPS, w = Math.max(8, n.duration * PPS), y = yOf(n.pitch);
+      const active = n.start <= t && t <= n.start + n.duration;
+      if (active) curName = n.name;
+      vc.fillStyle = active ? "#ffffff" : "#3aa7ff";
+      roundRect(vc, x, y - noteH / 2, w, noteH, 3); vc.fill();
+      if (w > 22 && noteH >= 11) { vc.fillStyle = INK; vc.fillText(n.name, x + Math.min(w / 2, 16), y); }
+    }
+    vc.textAlign = "left";
+    // now-line
+    vc.strokeStyle = NOWLINE; vc.lineWidth = 2; vc.beginPath(); vc.moveTo(nowX, padT); vc.lineTo(nowX, H - padB); vc.stroke(); vc.lineWidth = 1;
+    // current pitch readout
+    if (curName) { vc.fillStyle = "#3aa7ff"; vc.font = "bold 22px system-ui"; vc.textAlign = "left"; vc.fillText(curName, nowX + 10, padT + 16); }
+  }
+
   // ── Chords grid highlight ────────────────────────────────────────────────────
   let lastName = "";
   function updateGrid(t) {
@@ -310,6 +365,7 @@
     dirty = false;
     if (view === "player") drawPlayer(t);
     else if (view === "tab") drawTab(t);
+    else if (view === "vocals") drawVocals(t);
     else updateGrid(t);
     if (!seeking) $("seek").value = duration ? Math.round(t / duration * 1000) : 0;
     $("time").textContent = fmt(t) + " / " + fmt(duration);
@@ -323,7 +379,7 @@
   $("jobSelect").onchange = (e) => loadJob(e.target.value);
   $("speedSel").onchange = (e) => { rate = parseFloat(e.target.value); if (playing) play(songTime()); };
 
-  function setView(v) { view = v; for (const b of $("viewSeg").children) b.classList.toggle("active", b.dataset.view === v); $("playerView").classList.toggle("hidden", v !== "player"); $("chordsView").classList.toggle("hidden", v !== "chords"); $("tabView").classList.toggle("hidden", v !== "tab"); lastName = ""; dirty = true; }
+  function setView(v) { view = v; for (const b of $("viewSeg").children) b.classList.toggle("active", b.dataset.view === v); $("playerView").classList.toggle("hidden", v !== "player"); $("chordsView").classList.toggle("hidden", v !== "chords"); $("tabView").classList.toggle("hidden", v !== "tab"); $("vocalsView").classList.toggle("hidden", v !== "vocals"); lastName = ""; dirty = true; }
   $("viewSeg").onclick = (e) => { if (e.target.dataset.view) setView(e.target.dataset.view); };
   $("contentSeg").onclick = (e) => { const c = e.target.dataset.content; if (!c) return; content = c === "all" ? "both" : c; for (const b of $("contentSeg").children) b.classList.toggle("active", b.dataset.content === e.target.dataset.content); dirty = true; };
 
@@ -352,6 +408,7 @@
   async function init() {
     watchCanvas(stage);
     watchCanvas(tabStage);
+    watchCanvas(vocalStage);
     requestAnimationFrame(frame);
     const jobs = await refreshJobs();
     const done = jobs.find((j) => j.status === "done");

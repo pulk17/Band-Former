@@ -36,6 +36,15 @@ AUDIO_EXTS = (".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac", ".opus")
 app = FastAPI(title="Band-Former")
 
 
+@app.middleware("http")
+async def _no_cache(request, call_next):
+    # The static UI assets change during development; never let the browser
+    # serve a stale index.html / app.js / style.css.
+    resp = await call_next(request)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
 @dataclass
 class Job:
     id: str

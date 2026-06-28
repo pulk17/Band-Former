@@ -8,7 +8,14 @@
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><span class="logo">🎸</span> Band-Former</div>
+    <div class="brand">
+      <svg class="logo" width="20" height="20" viewBox="0 0 20 20" aria-hidden="true">
+        <rect x="2" y="8" width="3" height="10" rx="1.5" fill="#ff6a3d"/>
+        <rect x="8.5" y="3" width="3" height="15" rx="1.5" fill="#ff9f1c"/>
+        <rect x="15" y="11" width="3" height="7" rx="1.5" fill="#a06bff"/>
+      </svg>
+      Band-Former
+    </div>
     <div class="songpick">
       <select id="jobSelect" title="Processed songs"></select>
       <label class="upload" title="Upload audio">
@@ -22,7 +29,9 @@
   </header>
 
   <div class="toolbar glass">
-    <button id="playBtn" class="primary" disabled>▶</button>
+    <button id="playBtn" class="primary" disabled aria-label="Play">
+      <svg width="16" height="16" viewBox="0 0 16 16"><path d="M4 3l9 5-9 5z" fill="currentColor"/></svg>
+    </button>
     <span id="time" class="time">0:00 / 0:00</span>
     <input id="seek" type="range" min="0" max="1000" value="0" />
 
@@ -30,6 +39,7 @@
       <button data-view="player" class="active">Player</button>
       <button data-view="chords">Chords</button>
       <button data-view="tab">Tab</button>
+      <button data-view="vocals">Vocals</button>
     </div>
 
     <div class="seg" id="contentSeg" title="Show">
@@ -79,6 +89,11 @@
     <!-- Tab: scrolling melody tablature -->
     <section id="tabView" class="view hidden">
       <canvas id="tabStage"></canvas>
+    </section>
+
+    <!-- Vocals: pitch meter / piano-roll -->
+    <section id="vocalsView" class="view hidden">
+      <canvas id="vocalStage"></canvas>
     </section>
   </main>
 

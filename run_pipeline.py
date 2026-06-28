@@ -120,6 +120,22 @@ def process_audio(audio_path: Path | str) -> Path:
         except Exception as exc:  # noqa: BLE001
             print(f"  ⚠ Could not render ASCII tab: {exc}")
 
+        # Vocals pitch line — transcribe the isolated Vocals stem.
+        try:
+            from arrange import clean_monophonic
+            vstem = next(iter(out_dir.glob("*[Vv]ocals*.wav")), None)
+            if vstem:
+                vnotes = extract_notes(vstem)
+                vdicts = [{"start": n.start_time, "end": n.end_time, "pitch": n.pitch,
+                           "duration": n.end_time - n.start_time, "name": midi_to_name(n.pitch)}
+                          for n in vnotes]
+                data = json.loads(tab_json.read_text())
+                data["vocals"] = clean_monophonic(vdicts)
+                tab_json.write_text(json.dumps(data, indent=2))
+                print(f"  ✓ Vocals   : {len(data['vocals'])} pitch notes")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ⚠ Vocals transcription failed: {exc}")
+
     return out_dir
 
 

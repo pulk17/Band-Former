@@ -55,7 +55,8 @@ OPEN_SHAPES = {
     (9, "5"): ("A5", [-1, 0, 2, 2, -1, -1]),
 }
 
-MIN_NOTE_DUR = 0.06     # ghost-note cutoff (s)
+GHOST_DUR = 0.07        # drop notes shorter than this from the displayed set
+MELODY_MIN_DUR = 0.10   # melody candidates must be at least this long
 MIN_CHORD_DUR = 0.45    # merge chord segments shorter than this
 
 
@@ -133,10 +134,11 @@ def merge_chords(chords):
     return merged
 
 
-def declutter(notes):
+def declutter(notes, min_dur):
+    """Drop ghost notes (too short) and exact duplicate onsets of the same pitch."""
     kept, seen = [], set()
     for n in sorted(notes, key=lambda n: (n["start"], -n["pitch"])):
-        if n["duration"] < MIN_NOTE_DUR:
+        if n["duration"] < min_dur:
             continue
         key = (round(n["start"], 2), n["pitch"])
         if key in seen:
@@ -146,37 +148,104 @@ def declutter(notes):
     return kept
 
 
+def _onset_slots(notes, tol=0.08):
+    """Cluster notes whose onsets fall within `tol` seconds into the same slot."""
+    notes = sorted(notes, key=lambda n: n["start"])
+    slots, cur, t0 = [], [notes[0]], notes[0]["start"]
+    for n in notes[1:]:
+        if n["start"] - t0 <= tol:
+            cur.append(n)
+        else:
+            slots.append(cur); cur, t0 = [n], n["start"]
+    slots.append(cur)
+    return slots
+
+
 def extract_melody(notes):
-    """Skyline melody: highest note per quantized onset, made monophonic,
-    with consecutive same-pitch repeats merged."""
-    groups = defaultdict(list)
-    for n in notes:
-        groups[round(n.get("start_q", n["start"]), 2)].append(n)
-    line = [max(groups[k], key=lambda n: n["pitch"]) for k in sorted(groups)]
-    line.sort(key=lambda n: n["start"])
+    """Extract a clean, singable monophonic melody.
+
+    Per onset slot we keep the 3 highest notes as candidates, then find the
+    cheapest path with a Viterbi pass that rewards higher/longer notes but
+    *penalizes large pitch leaps*. That follows the actual lead line instead of
+    jumping to whichever overtone happens to be highest in a given slot (the old
+    skyline problem), and it ignores the low accompaniment voices entirely.
+    """
+    cand_notes = [n for n in notes if n["duration"] >= MELODY_MIN_DUR]
+    if not cand_notes:
+        return []
+    slots = _onset_slots(cand_notes)
+    cands = [sorted(s, key=lambda n: -n["pitch"])[:3] for s in slots]
+
+    def emit(n):                       # lower is better: prefer higher + longer
+        return -(n["pitch"] - 48) * 0.06 - min(n["duration"], 0.6) * 1.2
+
+    dp = [[0.0] * len(c) for c in cands]
+    bk = [[0] * len(c) for c in cands]
+    for j, n in enumerate(cands[0]):
+        dp[0][j] = emit(n)
+    for i in range(1, len(cands)):
+        for j, n in enumerate(cands[i]):
+            best, bestk = float("inf"), 0
+            for k, pn in enumerate(cands[i - 1]):
+                leap = abs(n["pitch"] - pn["pitch"])
+                c = dp[i - 1][k] + leap * 0.45 + (leap > 12) * 4.0   # leap penalty (+ hard octave cap)
+                if c < best:
+                    best, bestk = c, k
+            dp[i][j] = best + emit(n)
+            bk[i][j] = bestk
+
+    j = min(range(len(dp[-1])), key=lambda j: dp[-1][j])
+    path = []
+    for i in range(len(cands) - 1, -1, -1):
+        path.append(cands[i][j])
+        j = bk[i][j]
+    path.reverse()
 
     out = []
-    for i, n in enumerate(line):
+    for i, n in enumerate(path):
         dur = n["duration"]
-        if i + 1 < len(line):
-            gap = line[i + 1]["start"] - n["start"]
+        if i + 1 < len(path):
+            gap = path[i + 1]["start"] - n["start"]
             if gap > 0:
                 dur = min(dur, gap)
-        if out and out[-1]["pitch"] == n["pitch"] and n["start"] - (out[-1]["start"] + out[-1]["duration"]) < 0.08:
-            out[-1]["duration"] = (n["start"] + max(0.05, dur)) - out[-1]["start"]  # tie repeats
+        if out and out[-1]["pitch"] == n["pitch"] and \
+                n["start"] - (out[-1]["start"] + out[-1]["duration"]) < 0.1:
+            out[-1]["duration"] = (n["start"] + max(0.06, dur)) - out[-1]["start"]
         else:
-            out.append({**n, "duration": max(0.05, dur), "melody": True})
+            out.append({**n, "duration": max(0.06, dur), "melody": True})
+    return out
+
+
+def clean_monophonic(notes, min_dur=0.10):
+    """Reduce a (near-monophonic) transcription — e.g. vocals — to one note at a
+    time: drop ghosts, resolve overlaps to the higher pitch, merge repeats."""
+    notes = [dict(n) for n in notes if n["duration"] >= min_dur]
+    notes.sort(key=lambda n: n["start"])
+    out = []
+    for n in notes:
+        if out:
+            prev = out[-1]
+            if n["start"] < prev["start"] + prev["duration"]:        # overlap
+                if n["pitch"] <= prev["pitch"]:
+                    continue
+                prev["duration"] = max(0.06, n["start"] - prev["start"])
+            if prev["pitch"] == n["pitch"] and \
+                    n["start"] - (prev["start"] + prev["duration"]) < 0.12:
+                prev["duration"] = (n["start"] + n["duration"]) - prev["start"]
+                continue
+        out.append(n)
     return out
 
 
 def arrange(tab: dict) -> dict:
-    notes = tab.get("notes", [])
-    clean = declutter(notes)
+    raw = tab.get("notes", [])
+    notes = declutter(raw, GHOST_DUR)          # drop ghosts from the displayed set too
 
-    melody = extract_melody(clean)
+    melody = extract_melody(notes)
     melody_keys = {(round(n["start"], 3), n["pitch"]) for n in melody}
     for n in notes:
         n["melody"] = (round(n["start"], 3), n["pitch"]) in melody_keys
+    tab["notes"] = notes
     tab["melody"] = melody
 
     chords = merge_chords(tab.get("chords", []))
@@ -191,7 +260,7 @@ def arrange(tab: dict) -> dict:
     meta = tab.setdefault("metadata", {})
     meta["capo"] = capo
     meta["num_melody"] = len(melody)
-    meta["num_notes_clean"] = len(clean)
+    meta["num_notes_clean"] = len(notes)
     return tab
 
 
