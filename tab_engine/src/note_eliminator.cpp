@@ -85,6 +85,33 @@ int harmonic_weight(const std::vector<int>& pitches, int target_pitch){
     }
 }
 
+// Can these notes sound together on the guitar? Try every hand position: each
+// note must have a candidate that is an open string, or within a MAX_FRET_SPAN
+// window above some base fret, on a distinct string. This admits barre chords
+// (e.g. A major at the 5th fret) — unlike the old test that judged playability
+// from each note's lowest fret only and wrongly deleted valid barre voicings.
+static bool playable_subset(const std::vector<int>& subset, const CandidateGraph& graph){
+    if(subset.empty()) return true;
+    if(static_cast<int>(subset.size()) > NUM_STRINGS) return false;
+    for(int base = 0; base <= NUM_FRETS; ++base){
+        bool used[NUM_STRINGS] = {false};
+        bool ok = true;
+        for(int idx : subset){
+            bool placed = false;
+            for(const auto& node : graph[static_cast<size_t>(idx)]){
+                int f = node.position.fret, s = node.position.string_idx;
+                if(s < 0 || s >= NUM_STRINGS || used[s]) continue;
+                if(f == 0 || (f >= base && f <= base + MAX_FRET_SPAN)){
+                    used[s] = true; placed = true; break;
+                }
+            }
+            if(!placed){ ok = false; break; }
+        }
+        if(ok) return true;
+    }
+    return false;
+}
+
 EliminationResult eliminate_notes(const std::vector<int>& note_indices, const std::vector<NoteEvent>& notes, const CandidateGraph& graph){
     int n = static_cast<int>(note_indices.size());
 
@@ -116,56 +143,25 @@ EliminationResult eliminate_notes(const std::vector<int>& note_indices, const st
     pitches.reserve(n);
     for(int idx : note_indices) pitches.push_back(notes[idx].pitch);
 
-    std::vector<int> weights(n);
-    std::vector<int> min_fingers(n);
-
-    for(int i = 0; i < n; ++i){
-        int note_idx = note_indices[i];
-        weights[i] = harmonic_weight(pitches, notes[note_idx].pitch);
-
-        // A note costs 0 fingers if it can be played on an open string.
-        // Candidates are sorted by fret ascending, and the voicing built below
-        // uses the lowest-fret candidate (graph[note_idx][0]), so a fret of 0
-        // there means this note is free. The previous logic required *every*
-        // candidate to be open, which over-counted fingers for notes that also
-        // have fretted positions (e.g. G3 = open S3 or fretted elsewhere) and
-        // could make playable chords look unplayable.
-        if(graph[note_idx].empty() || graph[note_idx][0].position.fret == 0)
-            min_fingers[i] = 0;
-        else
-            min_fingers[i] = 1;
-    }
-
     int best_weight = -1;
     int best_mask = 0;
-
     int total_subsets = 1 << n;
 
     for(int mask = 0; mask < total_subsets; ++mask){
-        int finger_count = 0;
-        int weight_sum = 0;
-        std::vector<FretPosition> selected_positions;
-
-        // Collect pitches for this subset
+        std::vector<int> subset;          // playable note indices in this subset
         std::vector<int> subset_pitches;
         for(int i = 0; i < n; ++i){
-            if(mask & (1 << i)) {
-                if(!graph[note_indices[i]].empty())
-                    subset_pitches.push_back(pitches[i]);
+            if((mask & (1 << i)) && !graph[note_indices[i]].empty()){
+                subset.push_back(note_indices[i]);
+                subset_pitches.push_back(pitches[i]);
             }
         }
+        // A note can use at most one string, so >6 simultaneous is impossible.
+        if(static_cast<int>(subset.size()) > NUM_STRINGS) continue;
+        if(!playable_subset(subset, graph)) continue;
 
-        for(int i = 0; i < n; ++i){
-            if(mask & (1 << i)) {
-                if(graph[note_indices[i]].empty()) continue;
-
-                finger_count += min_fingers[i];
-                weight_sum += harmonic_weight(subset_pitches, notes[note_indices[i]].pitch);
-                selected_positions.push_back(graph[note_indices[i]][0].position);
-            }
-        }
-        if(finger_count > MAX_FINGERS) continue;
-        if(!is_playable_chord(selected_positions)) continue;
+        int weight_sum = 0;
+        for(int p : subset_pitches) weight_sum += harmonic_weight(subset_pitches, p);
 
         if(weight_sum > best_weight){
             best_mask = mask;

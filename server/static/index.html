@@ -16,19 +16,28 @@
       </svg>
       Band-Former
     </div>
+
     <div class="songpick">
-      <select id="jobSelect" title="Processed songs"></select>
-      <label class="upload" title="Upload audio">
+      <select id="jobSelect" title="Loaded songs"></select>
+      <button id="libraryBtn" title="Manage library">Library</button>
+    </div>
+
+    <div class="adder">
+      <input id="ytInput" type="url" placeholder="Paste a YouTube link…" />
+      <button id="ytBtn">Add</button>
+      <label class="upload" title="Upload an audio file">
         <input id="fileInput" type="file" accept="audio/*" hidden /> Upload
       </label>
     </div>
+
     <div class="badges">
       <span class="badge" id="keyBadge">key —</span>
       <span class="badge" id="bpmBadge">— bpm</span>
+      <span class="badge" id="capoBadge" style="display:none">capo —</span>
     </div>
   </header>
 
-  <div class="toolbar glass">
+  <div class="toolbar">
     <button id="playBtn" class="primary" disabled aria-label="Play">
       <svg width="16" height="16" viewBox="0 0 16 16"><path d="M4 3l9 5-9 5z" fill="currentColor"/></svg>
     </button>
@@ -40,66 +49,73 @@
       <button data-view="chords">Chords</button>
       <button data-view="tab">Tab</button>
       <button data-view="vocals">Vocals</button>
+      <button data-view="learn">Learn</button>
     </div>
 
     <div class="seg" id="contentSeg" title="Show">
       <button data-content="both" class="active">Both</button>
-      <button data-content="melody">Melody</button>
-      <button data-content="chords">Chords</button>
+      <button data-content="melody">Lead</button>
+      <button data-content="chords">Rhythm</button>
       <button data-content="all">All</button>
     </div>
 
-    <label class="speed">Speed
+    <label class="ctl">Speed
       <select id="speedSel">
-        <option value="0.5">0.5×</option>
-        <option value="0.75">0.75×</option>
-        <option value="1" selected>1×</option>
-        <option value="1.25">1.25×</option>
-        <option value="1.5">1.5×</option>
+        <option value="0.5">0.5×</option><option value="0.75">0.75×</option>
+        <option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option>
       </select>
     </label>
+    <label class="ctl">Capo<select id="capoSel"></select></label>
 
     <button id="loopBtn" title="Set A then B to loop">Loop</button>
     <button id="metroBtn" title="Metronome">Metro</button>
-    <button id="capoBtn" title="Toggle capo / open shapes vs barre shapes">Capo</button>
   </div>
 
   <div id="status" class="status"></div>
 
   <main>
-    <!-- Player: falling notes + live chord panel -->
     <section id="playerView" class="view">
       <canvas id="stage"></canvas>
-      <aside class="chordPanel glass">
+      <aside class="chordPanel">
         <div class="nowLabel">NOW</div>
         <div id="chordName" class="chordName">—</div>
         <div id="chordDiagram" class="diagram"></div>
+        <div class="nextRow">
+          <span class="nextLbl">NEXT</span>
+          <span id="nextChordName" class="nextName">—</span>
+          <span id="nextChordIn" class="nextIn"></span>
+        </div>
         <div class="upNext">
-          <div class="upTitle">Up next</div>
+          <div class="upTitle">Coming up</div>
           <div id="nextChords" class="nextChords"></div>
         </div>
       </aside>
     </section>
 
-    <!-- Chords: full chord chart with diagrams -->
-    <section id="chordsView" class="view hidden">
-      <div id="chordGrid" class="chordGrid"></div>
-    </section>
+    <section id="chordsView" class="view hidden"><div id="chordGrid" class="chordGrid"></div></section>
+    <section id="tabView" class="view hidden"><canvas id="tabStage"></canvas></section>
+    <section id="vocalsView" class="view hidden"><canvas id="vocalStage"></canvas></section>
+    <section id="learnView" class="view hidden"><div id="learnBody" class="learnBody"></div></section>
 
-    <!-- Tab: scrolling melody tablature -->
-    <section id="tabView" class="view hidden">
-      <canvas id="tabStage"></canvas>
-    </section>
-
-    <!-- Vocals: pitch meter / piano-roll -->
-    <section id="vocalsView" class="view hidden">
-      <canvas id="vocalStage"></canvas>
-    </section>
+    <!-- processing overlay -->
+    <div id="overlay" class="overlay hidden">
+      <div class="spinner"></div>
+      <div id="overlayMsg" class="overlayMsg">Working…</div>
+      <div id="overlaySub" class="overlaySub"></div>
+    </div>
   </main>
 
   <footer class="hint">
-    Space = play/pause · ← → = seek 5s · drag the timeline to scrub · synced to the Web Audio clock
+    <kbd>Space</kbd> play/pause · <kbd>←</kbd><kbd>→</kbd> seek · drag timeline to scrub · synced to the Web Audio clock
   </footer>
+
+  <!-- library modal -->
+  <div id="libraryModal" class="modal hidden">
+    <div class="modalCard">
+      <div class="modalHead"><span>Library</span><button id="libClose">✕</button></div>
+      <div id="libraryList" class="libraryList"></div>
+    </div>
+  </div>
 
   <script src="/static/app.js"></script>
 </body>

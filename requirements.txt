@@ -48,11 +48,13 @@ numpy
 scipy
 librosa
 soundfile
+yt-dlp
 
 # Web app (FastAPI backend + Canvas frontend)
 fastapi
 uvicorn[standard]
 python-multipart
+yt-dlp
 
 # Testing
 pytest

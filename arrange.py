@@ -58,6 +58,7 @@ OPEN_SHAPES = {
 GHOST_DUR = 0.07        # drop notes shorter than this from the displayed set
 MELODY_MIN_DUR = 0.10   # melody candidates must be at least this long
 MIN_CHORD_DUR = 0.45    # merge chord segments shorter than this
+LEAD_MAX_POLY = 2       # onset slots with <= this many notes feed the lead voice
 
 
 def _parse(name: str):
@@ -241,10 +242,17 @@ def arrange(tab: dict) -> dict:
     raw = tab.get("notes", [])
     notes = declutter(raw, GHOST_DUR)          # drop ghosts from the displayed set too
 
-    melody = extract_melody(notes)
+    # ── Two-voice separation: lead vs rhythm ─────────────────────────────────
+    # A single guitar plays either a single-note line (lead) or strums chords
+    # (rhythm), rarely both at once — so split by local polyphony. Notes in
+    # sparse onset slots feed the lead line; dense strum slots are rhythm.
+    slots = _onset_slots(notes) if notes else []
+    lead_pool = [n for s in slots if len(s) <= LEAD_MAX_POLY for n in s]
+    melody = extract_melody(lead_pool)
     melody_keys = {(round(n["start"], 3), n["pitch"]) for n in melody}
     for n in notes:
-        n["melody"] = (round(n["start"], 3), n["pitch"]) in melody_keys
+        n["voice"] = "lead" if (round(n["start"], 3), n["pitch"]) in melody_keys else "rhythm"
+        n["melody"] = n["voice"] == "lead"   # back-compat flag
     tab["notes"] = notes
     tab["melody"] = melody
 

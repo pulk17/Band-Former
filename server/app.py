@@ -17,14 +17,18 @@ from __future__ import annotations
 
 import json
 import queue
+import re
+import shutil
 import threading
 import uuid
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Body
+from pydantic import BaseModel
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+import yt_dlp
 
 BASE_DIR    = Path(__file__).resolve().parent.parent
 INPUT_DIR   = BASE_DIR / "data" / "input"
@@ -60,6 +64,46 @@ _lock = threading.Lock()
 _queue: "queue.Queue[tuple[str, Path]]" = queue.Queue()
 
 
+class MusicManager:
+    """Manages parsing, caching, and downloading of music files."""
+    def __init__(self, input_dir: Path, output_dir: Path):
+        self.input_dir = input_dir
+        self.output_dir = output_dir
+
+    def is_processed(self, stem: str) -> bool:
+        tab = self.output_dir / stem / "tab.json"
+        return tab.exists()
+
+    def get_youtube_info(self, url: str) -> dict:
+        ydl_opts = {'quiet': True, 'noplaylist': True}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            return ydl.extract_info(url, download=False)
+
+    def download_youtube(self, url: str) -> Path:
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': str(self.input_dir / '%(id)s.%(ext)s'),
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+            'quiet': True,
+            'noplaylist': True,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            return self.input_dir / f"{info['id']}.mp3"
+
+music_manager = MusicManager(INPUT_DIR, OUTPUT_DIR)
+
+
+def _safe_stem(name: str) -> str:
+    """Filesystem-safe song id: keeps separation output names + dirs consistent."""
+    s = re.sub(r"[^\w\- ]+", "", name).strip().replace(" ", "_")
+    return s or "track"
+
+
 def _output_dir_for(stem: str) -> Path:
     return OUTPUT_DIR / stem
 
@@ -87,8 +131,8 @@ def _seed_existing_jobs() -> None:
         return
     for d in sorted(OUTPUT_DIR.iterdir()):
         if d.is_dir() and (d / "tab.json").exists():
-            jid = f"demo-{d.name}"
-            _jobs[jid] = Job(id=jid, name=d.name, song_stem=d.name, status="done")
+            jid = d.name
+            _jobs[jid] = Job(id=jid, name=d.name, song_stem=d.name, status="done", stage="complete")
 
 
 def _worker() -> None:
@@ -134,12 +178,52 @@ async def transcribe(file: UploadFile = File(...)) -> JSONResponse:
     if suffix not in AUDIO_EXTS:
         raise HTTPException(400, f"Unsupported audio type: {suffix}")
 
-    stem = Path(file.filename or "upload").stem
+    stem = _safe_stem(Path(file.filename or "upload").stem)
     dest = INPUT_DIR / f"{stem}{suffix}"
     dest.write_bytes(await file.read())
 
-    job_id = uuid.uuid4().hex[:12]
+    job_id = stem
+    if music_manager.is_processed(stem):
+        # Already processed
+        with _lock:
+            if job_id not in _jobs:
+                _jobs[job_id] = Job(id=job_id, name=stem, song_stem=stem, status="done", stage="complete")
+        return JSONResponse({"job_id": job_id})
+
     job = Job(id=job_id, name=stem, song_stem=stem)
+    with _lock:
+        _jobs[job_id] = job
+
+    _queue.put((job_id, dest))
+    return JSONResponse({"job_id": job_id})
+
+
+class YouTubeRequest(BaseModel):
+    url: str
+
+@app.post("/api/transcribe/youtube")
+def transcribe_youtube(req: YouTubeRequest) -> JSONResponse:
+    try:
+        info = music_manager.get_youtube_info(req.url)
+    except Exception as e:
+        raise HTTPException(400, f"Could not fetch YouTube info: {e}")
+    
+    stem = info['id']
+    job_id = stem
+
+    if music_manager.is_processed(stem):
+        with _lock:
+            if job_id not in _jobs:
+                _jobs[job_id] = Job(id=job_id, name=info.get('title', stem), song_stem=stem, status="done", stage="complete")
+        return JSONResponse({"job_id": job_id})
+
+    # Download it
+    try:
+        dest = music_manager.download_youtube(req.url)
+    except Exception as e:
+        raise HTTPException(500, f"Download failed: {e}")
+
+    job = Job(id=job_id, name=info.get('title', stem), song_stem=stem)
     with _lock:
         _jobs[job_id] = job
 
@@ -181,6 +265,24 @@ def audio(job_id: str) -> FileResponse:
     if not src or not src.exists():
         raise HTTPException(404, "audio not found")
     return FileResponse(src)
+
+
+@app.delete("/api/jobs/{job_id}")
+def delete_job(job_id: str) -> dict:
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "unknown job")
+    d = _output_dir_for(job.song_stem)
+    if d.is_dir():
+        shutil.rmtree(d, ignore_errors=True)
+    for ext in AUDIO_EXTS:
+        p = INPUT_DIR / f"{job.song_stem}{ext}"
+        if p.exists():
+            try: p.unlink()
+            except OSError: pass
+    with _lock:
+        _jobs.pop(job_id, None)
+    return {"ok": True}
 
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

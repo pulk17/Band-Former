@@ -8,27 +8,54 @@
 
   // ── Data ──────────────────────────────────────────────────────────────────
   let tab = null, allNotes = [], melodyNotes = [], harmonyNotes = [], chords = [], beats = [], duration = 0;
-  let vocals = [], vlo = 48, vhi = 72;
-  let view = "player", content = "both", capo = 0, useCapo = false;
-  const voicingOf = (c) => (useCapo && capo > 0 && c.capoVoicing) ? c.capoVoicing : (c.voicing || null);
+  let vocals = [], vpitch = [], vlo = 48, vhi = 72;
+  let view = "player", content = "both", capo = 0, recommendedCapo = 0, curJob = null;
 
-  // ── Web Audio (AudioContext.currentTime is the master clock) ──────────────
+  // ── Chord voicings (computed live so any capo can be selected) ───────────────
+  const NOTE_PC = { C: 0, "C#": 1, D: 2, "D#": 3, E: 4, F: 5, "F#": 6, G: 7, "G#": 8, A: 9, "A#": 10, B: 11 };
+  const PC_NOTE = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+  const BARRE = { maj: [0,2,2,1,0,0], min: [0,2,2,0,0,0], "5": [0,2,2,-1,-1,-1],
+                  "7": [0,2,0,1,0,0], maj7: [0,2,1,1,0,0], min7: [0,2,0,0,0,0], sus4: [0,2,2,2,0,0] };
+  const OPEN = {
+    "0|maj":["C",[-1,3,2,0,1,0]],"2|maj":["D",[-1,-1,0,2,3,2]],"4|maj":["E",[0,2,2,1,0,0]],
+    "7|maj":["G",[3,2,0,0,0,3]],"9|maj":["A",[-1,0,2,2,2,0]],
+    "2|min":["Dm",[-1,-1,0,2,3,1]],"4|min":["Em",[0,2,2,0,0,0]],"9|min":["Am",[-1,0,2,2,1,0]],
+    "0|7":["C7",[-1,3,2,3,1,0]],"2|7":["D7",[-1,-1,0,2,1,2]],"4|7":["E7",[0,2,0,1,0,0]],
+    "7|7":["G7",[3,2,0,0,0,1]],"9|7":["A7",[-1,0,2,0,2,0]],"11|7":["B7",[-1,2,1,2,0,2]],
+    "0|maj7":["Cmaj7",[-1,3,2,0,0,0]],"2|maj7":["Dmaj7",[-1,-1,0,2,2,2]],"4|maj7":["Emaj7",[0,2,1,1,0,0]],
+    "5|maj7":["Fmaj7",[-1,-1,3,2,1,0]],"7|maj7":["Gmaj7",[3,2,0,0,0,2]],"9|maj7":["Amaj7",[-1,0,2,1,2,0]],
+    "2|min7":["Dm7",[-1,-1,0,2,1,1]],"4|min7":["Em7",[0,2,0,0,0,0]],"9|min7":["Am7",[-1,0,2,0,1,0]],
+    "2|sus4":["Dsus4",[-1,-1,0,2,3,3]],"4|sus4":["Esus4",[0,2,2,2,0,0]],"9|sus4":["Asus4",[-1,0,2,2,3,0]],
+    "2|5":["D5",[-1,-1,0,2,3,-1]],"4|5":["E5",[0,2,2,-1,-1,-1]],"9|5":["A5",[-1,0,2,2,-1,-1]],
+  };
+  function jsVoicing(name, c) {
+    if (!name || !name.includes(":")) return null;
+    const [root, qual] = name.split(":");
+    if (!(root in NOTE_PC) || !(qual in BARRE)) return null;
+    const t = ((NOTE_PC[root] - c) % 12 + 12) % 12;
+    const o = OPEN[t + "|" + qual];
+    if (o) return { name: o[0], frets: o[1], baseFret: 0, open: true };
+    const base = ((t - 4) % 12 + 12) % 12;
+    return { name: PC_NOTE[t] + (qual === "min" ? "m" : qual === "maj" ? "" : qual),
+             frets: BARRE[qual].map((v) => v < 0 ? -1 : v + base), baseFret: base, open: false };
+  }
+  const voicingOf = (c) => jsVoicing(c.name, capo);
+  const NAME = (p) => PC_NOTE[((p % 12) + 12) % 12] + (Math.floor(p / 12) - 1);
+
+  // ── Web Audio ───────────────────────────────────────────────────────────────
   let actx = null, buffer = null, src = null;
   let playing = false, t0ctx = 0, t0song = 0, paused = 0, rate = 1, seeking = false, dirty = true;
-  let loopA = null, loopB = null;
-  let metro = false, metroIdx = 0;
+  let loopA = null, loopB = null, metro = false, metroIdx = 0;
 
   const ctx = () => (actx || (actx = new (window.AudioContext || window.webkitAudioContext)()));
   const songTime = () => playing ? t0song + (ctx().currentTime - t0ctx) * rate : paused;
-
   function stopSrc() { if (src) { try { src.onended = null; src.stop(); } catch (e) {} src = null; } }
   function play(off) {
     ctx(); if (actx.state === "suspended") actx.resume();
     if (!buffer) return;
     stopSrc();
     off = Math.max(0, Math.min(off, duration));
-    src = actx.createBufferSource();
-    src.buffer = buffer; src.playbackRate.value = rate;
+    src = actx.createBufferSource(); src.buffer = buffer; src.playbackRate.value = rate;
     src.connect(actx.destination);
     src.onended = () => { if (playing && songTime() >= duration - 0.06) { pause(); paused = 0; } };
     src.start(0, off);
@@ -38,91 +65,114 @@
   function pause() { if (!playing) return; paused = songTime(); playing = false; stopSrc(); $("playBtn").innerHTML = PLAY_ICON; dirty = true; }
   const toggle = () => { if (buffer) (playing ? pause() : play(paused)); };
   const seekTo = (t) => { t = Math.max(0, Math.min(t, duration)); if (playing) play(t); else { paused = t; dirty = true; } };
-
   function click(when) {
     const o = actx.createOscillator(), g = actx.createGain();
     o.frequency.value = 1500; o.connect(g); g.connect(actx.destination);
-    g.gain.setValueAtTime(0.0001, when);
-    g.gain.exponentialRampToValueAtTime(0.5, when + 0.001);
-    g.gain.exponentialRampToValueAtTime(0.0001, when + 0.05);
-    o.start(when); o.stop(when + 0.06);
+    g.gain.setValueAtTime(0.0001, when); g.gain.exponentialRampToValueAtTime(0.5, when + 0.001);
+    g.gain.exponentialRampToValueAtTime(0.0001, when + 0.05); o.start(when); o.stop(when + 0.06);
   }
 
-  // ── Loading ───────────────────────────────────────────────────────────────
-  async function refreshJobs(sel) {
-    const j = await (await fetch("/api/jobs")).json();
+  // ── Overlay ───────────────────────────────────────────────────────────────
+  const showOverlay = (msg, sub) => { $("overlayMsg").textContent = msg; $("overlaySub").textContent = sub || ""; $("overlay").classList.remove("hidden"); };
+  const hideOverlay = () => $("overlay").classList.add("hidden");
+
+  // ── Jobs / library ──────────────────────────────────────────────────────────
+  async function getJobs() { return (await (await fetch("/api/jobs")).json()).jobs; }
+  function fillJobSelect(jobs, sel) {
     const s = $("jobSelect"); s.innerHTML = "";
-    for (const job of j.jobs) {
-      const o = document.createElement("option");
-      o.value = job.id; o.textContent = `${job.name} · ${job.status}`;
-      s.appendChild(o);
-    }
+    for (const j of jobs) { const o = document.createElement("option"); o.value = j.id; o.textContent = j.name; s.appendChild(o); }
     if (sel) s.value = sel;
-    return j.jobs;
   }
+  async function refreshJobs(sel) { const jobs = await getJobs(); fillJobSelect(jobs, sel); return jobs; }
 
   async function loadJob(id) {
-    pause(); paused = 0; loopA = loopB = null; $("loopBtn").classList.remove("on");
-    $("status").textContent = "Loading…";
+    pause(); paused = 0; loopA = loopB = null; $("loopBtn").classList.remove("on"); $("loopBtn").textContent = "Loop";
+    curJob = id;
     const r = await fetch(`/api/result/${id}`);
     if (!r.ok) { $("status").textContent = "Result not ready"; return; }
     tab = await r.json();
     allNotes = (tab.notes || []).slice().sort((a, b) => a.start - b.start);
-    melodyNotes = allNotes.filter((n) => n.melody);
-    harmonyNotes = allNotes.filter((n) => !n.melody);
+    melodyNotes = allNotes.filter((n) => n.voice === "lead" || n.melody);
+    harmonyNotes = allNotes.filter((n) => !(n.voice === "lead" || n.melody));
     chords = (tab.chords || []).slice().sort((a, b) => a.start - b.start);
     beats = tab.beats || [];
     vocals = (tab.vocals || []).slice().sort((a, b) => a.start - b.start);
-    if (vocals.length) {
-      const ps = vocals.map((n) => n.pitch);
-      vlo = Math.min(...ps) - 2; vhi = Math.max(...ps) + 2;
-    }
-    const vbtn = $("viewSeg").querySelector('[data-view=vocals]');
-    if (vbtn) vbtn.style.display = vocals.length ? "" : "none";
+    vpitch = tab.vocal_pitch || [];
+    if (vocals.length) { const ps = vocals.map((n) => n.pitch); vlo = Math.min(...ps) - 3; vhi = Math.max(...ps) + 3; }
+    $("viewSeg").querySelector('[data-view=vocals]').style.display = (vocals.length || vpitch.length) ? "" : "none";
+
     const m = tab.metadata || {};
     const last = allNotes.length ? allNotes[allNotes.length - 1] : null;
     duration = m.duration_sec || (last ? last.start + last.duration : 0);
     $("keyBadge").textContent = "key " + (m.key || "—");
     $("bpmBadge").textContent = (m.bpm ? Number(m.bpm).toFixed(0) : "—") + " bpm";
-    capo = m.capo || 0;
-    useCapo = capo > 0;
-    $("capoBtn").textContent = capo > 0 ? `Capo ${capo}` : "No capo";
-    $("capoBtn").classList.toggle("on", useCapo);
-    $("capoBtn").disabled = capo === 0;
+    recommendedCapo = m.capo || 0;
+    fillCapoSelect();
+    capo = recommendedCapo;
+    $("capoSel").value = String(capo);
+    updateCapoBadge();
 
     ctx();
     const ab = await (await fetch(`/api/audio/${id}`)).arrayBuffer();
     buffer = await actx.decodeAudioData(ab);
     duration = Math.max(duration, buffer.duration);
     $("playBtn").disabled = false;
-    buildChordGrid();
-    $("status").textContent = "";
-    dirty = true;
+    buildChordGrid(); buildLearn();
+    $("status").textContent = ""; dirty = true;
   }
 
-  // ── Upload + poll ───────────────────────────────────────────────────────────
+  function fillCapoSelect() {
+    const s = $("capoSel"); s.innerHTML = "";
+    for (let k = 0; k <= 9; k++) {
+      const o = document.createElement("option"); o.value = String(k);
+      o.textContent = (k === 0 ? "0 (none)" : String(k)) + (k === recommendedCapo && k > 0 ? " ★" : "");
+      s.appendChild(o);
+    }
+  }
+  const updateCapoBadge = () => {
+    const b = $("capoBadge");
+    b.style.display = capo > 0 ? "" : "none";
+    b.textContent = "capo " + capo;
+  };
+
+  // ── Add: upload / youtube ─────────────────────────────────────────────────
   $("fileInput").addEventListener("change", async (e) => {
     const f = e.target.files[0]; if (!f) return;
-    $("status").textContent = `Uploading ${f.name}…`;
+    showOverlay("Uploading…", f.name);
     const fd = new FormData(); fd.append("file", f);
     const r = await fetch("/api/transcribe", { method: "POST", body: fd });
-    if (!r.ok) { $("status").textContent = "Upload failed"; return; }
+    e.target.value = "";
+    if (!r.ok) { showOverlay("Upload failed", await r.text()); return; }
     poll((await r.json()).job_id);
   });
+  $("ytBtn").addEventListener("click", async () => {
+    const url = $("ytInput").value.trim(); if (!url) return;
+    showOverlay("Fetching from YouTube…", url);
+    const r = await fetch("/api/transcribe/youtube", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }),
+    });
+    if (!r.ok) { let d = ""; try { d = (await r.json()).detail; } catch (e) {} showOverlay("YouTube failed", d || `HTTP ${r.status}`); return; }
+    $("ytInput").value = "";
+    poll((await r.json()).job_id);
+  });
+
+  const STAGES = { processing: "Separating stems → tracking beats → transcribing → building tab", cached: "Loading cached result", queued: "Queued…" };
   async function poll(id) {
-    const s = await (await fetch(`/api/status/${id}`)).json();
-    if (s.status === "done") { $("status").textContent = ""; await refreshJobs(id); return loadJob(id); }
-    if (s.status === "error") { $("status").textContent = "Error: " + (s.error || "").split("\n").pop(); return; }
-    $("status").textContent = `Transcribing… ${s.stage || s.status} (a few minutes)`;
-    setTimeout(() => poll(id), 2500);
+    let s;
+    try { s = await (await fetch(`/api/status/${id}`)).json(); }
+    catch (e) { showOverlay("Lost connection", String(e)); return; }
+    if (s.status === "done") { hideOverlay(); await refreshJobs(id); $("jobSelect").value = id; return loadJob(id); }
+    if (s.status === "error") { showOverlay("Processing failed", (s.error || "").split("\n").filter(Boolean).pop() || "unknown error"); return; }
+    showOverlay(s.status === "cached" ? "Loading…" : "Transcribing… (first time only, ~1–3 min)",
+                STAGES[s.status] || s.stage || s.status);
+    setTimeout(() => poll(id), 1500);
   }
 
   // ── Chord diagram (SVG) ─────────────────────────────────────────────────────
   function chordSVG(v, size = 116) {
     if (!v || !v.frets) return "";
     const frets = v.frets, fretted = frets.filter((f) => f > 0);
-    const maxF = fretted.length ? Math.max(...fretted) : 0;
-    const minF = fretted.length ? Math.min(...fretted) : 0;
+    const maxF = fretted.length ? Math.max(...fretted) : 0, minF = fretted.length ? Math.min(...fretted) : 0;
     const open = maxF <= 4, startFret = open ? 0 : minF;
     const FR = 5, ST = 6, w = size, h = size * 1.18;
     const padX = size * 0.16, padT = size * 0.2, padB = size * 0.06;
@@ -140,19 +190,21 @@
     return s + "</svg>";
   }
 
-  function buildChordGrid() {
-    const g = $("chordGrid"); g.innerHTML = "";
-    // Unique chord shapes used in the song (deduped by name) — the set you
-    // actually need to learn, not the 200-segment timeline.
+  function uniqueChords() {
     const seen = new Map(), count = new Map();
     for (const c of chords) {
       if (c.name === "silence" || c.name === "unknown") continue;
       count.set(c.name, (count.get(c.name) || 0) + 1);
       if (!seen.has(c.name)) seen.set(c.name, c);
     }
-    for (const c of seen.values()) {
+    return { list: [...seen.values()], count };
+  }
+  function buildChordGrid() {
+    const g = $("chordGrid"); g.innerHTML = "";
+    const { list, count } = uniqueChords();
+    for (const c of list) {
       const v = voicingOf(c);
-      const shape = (useCapo && capo > 0 && v) ? `<div class="play">play ${v.name}</div>` : "";
+      const shape = (capo > 0 && v) ? `<div class="play">play ${v.name}</div>` : "";
       const d = document.createElement("div");
       d.className = "chordCard"; d.dataset.name = c.name;
       d.innerHTML = `<div class="cn">${c.name}</div>${chordSVG(v, 104)}${shape}<div class="ct">${count.get(c.name)}×</div>`;
@@ -161,55 +213,105 @@
     }
   }
 
-  // ── Helpers ─────────────────────────────────────────────────────────────────
+  // ── Learn view (music theory derived from the song) ──────────────────────────
+  const MAJ_DEG = [0,2,4,5,7,9,11], MIN_DEG = [0,2,3,5,7,8,10];
+  const MAJ_ROMAN = ["I","ii","iii","IV","V","vi","vii°"], MIN_ROMAN = ["i","ii°","III","iv","v","VI","VII"];
+  function buildLearn() {
+    const el = $("learnBody"); if (!el) return;
+    const m = tab.metadata || {};
+    const key = m.key || "";
+    const [tonicName, mode] = key.split(" ");
+    const tonic = NOTE_PC[tonicName]; const major = mode === "major";
+    if (tonic === undefined) { el.innerHTML = "<p class='muted'>Key not detected for this song.</p>"; return; }
+    const degs = major ? MAJ_DEG : MIN_DEG, roman = major ? MAJ_ROMAN : MIN_ROMAN;
+    const scalePcs = degs.map((d) => (tonic + d) % 12);
+    const scaleNames = scalePcs.map((p) => PC_NOTE[p]);
+
+    const { list, count } = uniqueChords();
+    const sorted = list.sort((a, b) => count.get(b.name) - count.get(a.name));
+    const chordRows = sorted.slice(0, 10).map((c) => {
+      const root = NOTE_PC[c.name.split(":")[0]];
+      const di = scalePcs.indexOf(root);
+      const r = di >= 0 ? roman[di] : "borrowed";
+      const v = jsVoicing(c.name, capo);
+      const play = capo > 0 && v ? ` — play <b>${v.name}</b>` : (v ? ` — <b>${v.name}</b> shape` : "");
+      return `<tr><td><b>${c.name}</b></td><td>${r}</td><td>${count.get(c.name)}×</td><td>${play}</td></tr>`;
+    }).join("");
+
+    const prog = chords.filter((c) => c.name !== "silence" && c.name !== "unknown");
+    const seq = []; for (const c of prog) { if (!seq.length || seq[seq.length-1] !== c.name) seq.push(c.name); if (seq.length >= 8) break; }
+
+    const I = PC_NOTE[tonic], IV = PC_NOTE[(tonic+5)%12], V = PC_NOTE[(tonic+7)%12], vi = PC_NOTE[(tonic+9)%12];
+    el.innerHTML = `
+      <div class="learnGrid">
+        <section class="card">
+          <h3>This song in a nutshell</h3>
+          <p><b>Key:</b> ${key} &nbsp; <b>Tempo:</b> ${m.bpm ? Number(m.bpm).toFixed(0) : "?"} BPM &nbsp; ${capo>0?`<b>Capo:</b> fret ${capo}`:"<b>No capo</b>"}</p>
+          <p><b>${key} scale:</b> ${scaleNames.join(" · ")}</p>
+          <p class="muted">These 7 notes are your "safe" notes for soloing/melody over this song.</p>
+        </section>
+        <section class="card">
+          <h3>The chords & their job</h3>
+          <table class="ltab"><tr><th>Chord</th><th>Role</th><th>Uses</th><th></th></tr>${chordRows}</table>
+          <p class="muted">Roman numerals show each chord's function. ${major?`<b>${I}</b> (I) is home, <b>${IV}</b> (IV) and <b>${V}</b> (V) create tension/resolution, <b>${vi}</b> (vi) is the sad one.`:`<b>${I}</b> (i) is home in a minor key.`}</p>
+        </section>
+        <section class="card">
+          <h3>Progression</h3>
+          <p class="prog">${seq.map((n)=>`<span>${n.replace(":maj","").replace(":min","m").replace(":"," ")}</span>`).join("<i>→</i>")}</p>
+          <p class="muted">The recurring loop the song is built on.</p>
+        </section>
+        <section class="card">
+          <h3>Step-by-step practice</h3>
+          <ol class="steps">
+            <li><b>Learn the shapes.</b> Open the <b>Chords</b> tab; ${capo>0?`put a capo on fret ${capo} and `:""}memorize the ${sorted.length} shapes above.</li>
+            <li><b>Changes, slowly.</b> Loop a section (Loop button) at <b>0.5×</b> and switch cleanly between chords on the beat (turn on Metro).</li>
+            <li><b>The riff/lead.</b> Switch <b>Show → Lead</b> and the <b>Tab</b> tab; learn the single-note line.</li>
+            <li><b>Put it together.</b> Play rhythm under the lead, ramp speed 0.5×→0.75×→1×.</li>
+            <li><b>Sing it.</b> The <b>Vocals</b> tab shows the vocal pitch line to match.</li>
+          </ol>
+        </section>
+        <section class="card">
+          <h3>Theory tip</h3>
+          <p>The <b>I–IV–V</b> of ${key} is <b>${I} – ${IV} – ${V}</b> — the three chords behind a huge share of songs. Master moving between them and you can busk most of this genre.</p>
+          <p class="muted">${major?"Major key = bright/happy.":"Minor key = darker/moody."} The vi/relative chord (${vi}) borrows the same notes.</p>
+        </section>
+      </div>`;
+  }
+
+  // ── Canvas helpers ───────────────────────────────────────────────────────────
   const LABELS = ["e", "B", "G", "D", "A", "E"];
-  const COLORS = ["#ff6a3d", "#ff9f1c", "#ffd23f", "#4cc97f", "#3aa7ff", "#a06bff"]; // e B G D A E
+  const COLORS = ["#ff6a3d", "#ff9f1c", "#ffd23f", "#4cc97f", "#3aa7ff", "#a06bff"];
   const NOWLINE = "#ffffff", INK = "#11131a";
   const PPS = 150, NOW = 0.24;
   const fmt = (s) => { s = Math.max(0, s | 0); return (s / 60 | 0) + ":" + String(s % 60).padStart(2, "0"); };
   function lower(arr, t) { let lo = 0, hi = arr.length; while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m].start < t) lo = m + 1; else hi = m; } return lo; }
   function chordAt(t) { let cur = null; for (const c of chords) { if (c.start <= t && t < c.end) cur = c; if (c.start > t) break; } return cur; }
   function roundRect(c, x, y, w, h, r) { c.beginPath(); c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r); c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath(); }
-
-  // Robust canvas sizing: a ResizeObserver sets the backing store from the
-  // element's real box only when it changes — never a per-frame clientWidth
-  // read (which can momentarily be 0 and corrupt the transform / now-line).
   const csize = new Map();
   function watchCanvas(cv) {
     const apply = () => {
       const dpr = window.devicePixelRatio || 1;
       const r = cv.getBoundingClientRect();
-      const w = Math.min(8000, Math.max(1, Math.round(r.width)));   // clamp guards a sizing feedback loop
-      const h = Math.min(8000, Math.max(1, Math.round(r.height)));
+      const w = Math.min(8000, Math.max(1, Math.round(r.width))), h = Math.min(8000, Math.max(1, Math.round(r.height)));
       const bw = Math.round(w * dpr), bh = Math.round(h * dpr);
       if (cv.width !== bw || cv.height !== bh) { cv.width = bw; cv.height = bh; }
-      csize.set(cv, { w, h, dpr });
-      dirty = true;
+      csize.set(cv, { w, h, dpr }); dirty = true;
     };
-    new ResizeObserver(apply).observe(cv);
-    apply();
+    new ResizeObserver(apply).observe(cv); apply();
   }
-  function frameSize(cv, c) {
-    const s = csize.get(cv) || { w: 1, h: 1, dpr: 1 };
-    c.setTransform(s.dpr, 0, 0, s.dpr, 0, 0);
-    return [s.w, s.h];
-  }
+  function frameSize(cv, c) { const s = csize.get(cv) || { w: 1, h: 1, dpr: 1 }; c.setTransform(s.dpr, 0, 0, s.dpr, 0, 0); return [s.w, s.h]; }
 
-  // ── Player canvas ─────────────────────────────────────────────────────────
+  // ── Player ───────────────────────────────────────────────────────────────────
   function drawPlayer(t) {
     const [W, H] = frameSize(stage, sx);
     sx.clearRect(0, 0, W, H);
     const nowX = Math.round(W * NOW), ribbon = 36, top = ribbon, laneH = (H - ribbon) / 6;
-
-    // beat grid
-    if (beats.length) { sx.strokeStyle = "rgba(255,255,255,0.045)"; for (const b of beats) { const x = nowX + (b - t) * PPS; if (x < 0 || x > W) continue; sx.beginPath(); sx.moveTo(x, top); sx.lineTo(x, H); sx.stroke(); } }
-
-    // lanes
-    sx.lineWidth = 1; sx.strokeStyle = "rgba(255,255,255,0.07)"; sx.font = "11px system-ui"; sx.textBaseline = "middle"; sx.textAlign = "left";
-    for (let s = 0; s < 6; s++) { const y = top + laneH * (s + 0.5); sx.beginPath(); sx.moveTo(0, y); sx.lineTo(W, y); sx.stroke(); sx.fillStyle = COLORS[s]; sx.globalAlpha = 0.65; sx.fillText(LABELS[s], 7, y); sx.globalAlpha = 1; }
-
-    // chord ribbon
     const tStart = t - nowX / PPS, tEnd = t + (W - nowX) / PPS;
+
+    if (beats.length) { sx.strokeStyle = "rgba(255,255,255,0.045)"; for (const b of beats) { const x = nowX + (b - t) * PPS; if (x < 0 || x > W) continue; sx.beginPath(); sx.moveTo(x, top); sx.lineTo(x, H); sx.stroke(); } }
+    sx.lineWidth = 1; sx.font = "11px system-ui"; sx.textBaseline = "middle"; sx.textAlign = "left";
+    for (let s = 0; s < 6; s++) { const y = top + laneH * (s + 0.5); sx.strokeStyle = "rgba(255,255,255,0.07)"; sx.beginPath(); sx.moveTo(0, y); sx.lineTo(W, y); sx.stroke(); sx.fillStyle = COLORS[s]; sx.globalAlpha = 0.65; sx.fillText(LABELS[s], 7, y); sx.globalAlpha = 1; }
+
     sx.textAlign = "center"; sx.font = "bold 13px system-ui";
     for (const c of chords) {
       if (c.end < tStart || c.start > tEnd) continue;
@@ -222,8 +324,7 @@
     }
     sx.strokeStyle = "rgba(255,255,255,0.10)"; sx.beginPath(); sx.moveTo(0, ribbon); sx.lineTo(W, ribbon); sx.stroke();
 
-    // notes
-    let list = content === "melody" ? melodyNotes : content === "chords" ? harmonyNotes : allNotes;
+    const list = content === "melody" ? melodyNotes : content === "chords" ? harmonyNotes : allNotes;
     sx.font = "bold 11px system-ui"; sx.textAlign = "center";
     for (let i = Math.max(0, lower(list, tStart) - 30); i < list.length; i++) {
       const n = list[i]; if (n.start > tEnd) break; if (n.start + n.duration < tStart) continue;
@@ -231,16 +332,15 @@
       const x = nowX + (n.start - t) * PPS, w = Math.max(11, n.duration * PPS);
       const y = top + laneH * (s + 0.5), h = laneH * 0.6;
       const active = n.start <= t && t <= n.start + n.duration;
-      const mel = n.melody;
+      const mel = n.voice === "lead" || n.melody;
+      const sf = n.fret - capo;                 // capo-relative fret a player frets
       sx.globalAlpha = active ? 1 : (mel ? 0.95 : 0.3);
       sx.fillStyle = active ? "#ffffff" : COLORS[s];
       roundRect(sx, x, y - h / 2, w, h, 4); sx.fill();
       sx.globalAlpha = 1;
-      if ((active || mel) && w > 13) { sx.fillStyle = INK; sx.fillText(String(n.fret), x + Math.min(w / 2, 11), y); }
+      if ((active || mel) && w > 13 && sf >= 0) { sx.fillStyle = INK; sx.fillText(String(sf), x + Math.min(w / 2, 11), y); }
     }
     sx.textAlign = "left";
-
-    // now-line
     sx.strokeStyle = NOWLINE; sx.lineWidth = 2; sx.beginPath(); sx.moveTo(nowX, 0); sx.lineTo(nowX, H); sx.stroke(); sx.lineWidth = 1;
 
     // chord panel
@@ -248,22 +348,24 @@
     $("chordName").textContent = cur ? cur.name : "—";
     const diag = $("chordDiagram");
     const v = cur ? voicingOf(cur) : null;
-    const key = (cur ? cur.name : "_") + "|" + useCapo;
+    const key = (cur ? cur.name : "_") + "|" + capo;
     if (diag.dataset.k !== key) {
       diag.dataset.k = key;
-      const label = (v && useCapo && capo > 0) ? `<div class="shapeName">play <b>${v.name}</b> · capo ${capo}</div>` : "";
+      const label = (v && capo > 0) ? `<div class="shapeName">play <b>${v.name}</b> · capo ${capo}</div>` : "";
       diag.innerHTML = v ? label + chordSVG(v, 150) : "";
     }
-    const upcoming = chords.filter((c) => c.start > t).slice(0, 4);
+    const upcoming = chords.filter((c) => c.start > t && c.name !== "silence");
+    const nxt = upcoming[0];
+    $("nextChordName").textContent = nxt ? nxt.name : "—";
+    $("nextChordIn").textContent = nxt ? `in ${Math.max(0, nxt.start - t).toFixed(1)}s` : "";
     const nx = $("nextChords");
-    const sig = upcoming.map((c) => c.name + c.start.toFixed(1)).join();
+    const sig = upcoming.slice(0, 4).map((c) => c.name + c.start.toFixed(1)).join();
     if (nx.dataset.sig !== sig) {
       nx.dataset.sig = sig;
-      nx.innerHTML = upcoming.map((c) => `<div class="nextChip"><b>${c.name}</b><span class="t">${fmt(c.start)}</span></div>`).join("");
+      nx.innerHTML = upcoming.slice(0, 4).map((c) => `<div class="nextChip"><b>${c.name}</b><span class="t">${fmt(c.start)}</span></div>`).join("");
     }
   }
 
-  // ── Tab (scrolling melody tablature) ─────────────────────────────────────────
   function drawTab(t) {
     const [W, H] = frameSize(tabStage, tx);
     tx.clearRect(0, 0, W, H);
@@ -274,47 +376,44 @@
       tx.strokeStyle = "rgba(255,255,255,0.12)"; tx.beginPath(); tx.moveTo(0, y); tx.lineTo(W, y); tx.stroke();
       tx.textAlign = "left"; tx.fillStyle = COLORS[s]; tx.globalAlpha = 0.7; tx.fillText(LABELS[s], 9, y); tx.globalAlpha = 1;
     }
-    // measure bars
     if (beats.length) { tx.strokeStyle = "rgba(255,255,255,0.06)"; beats.forEach((b, i) => { if (i % 4) return; const x = nowX + (b - t) * PPS; if (x < 0 || x > W) return; tx.beginPath(); tx.moveTo(x, pad); tx.lineTo(x, H - pad); tx.stroke(); }); }
     const tStart = t - nowX / PPS, tEnd = t + (W - nowX) / PPS;
     tx.font = "bold 16px ui-monospace, monospace"; tx.textAlign = "center";
     for (let i = Math.max(0, lower(melodyNotes, tStart) - 6); i < melodyNotes.length; i++) {
       const n = melodyNotes[i]; if (n.start > tEnd) break; if (n.start < tStart - 1) continue;
       const s = n.string - 1; if (s < 0 || s > 5) continue;
+      const sf = n.fret - capo; if (sf < 0) continue;
       const x = nowX + (n.start - t) * PPS, y = pad + laneH * (s + 0.5);
       const active = n.start <= t && t <= n.start + n.duration;
       tx.fillStyle = active ? "#ffffff" : COLORS[s];
-      tx.fillText(String(n.fret), x, y);
+      tx.fillText(String(sf), x, y);
     }
     tx.textAlign = "left";
     tx.strokeStyle = NOWLINE; tx.lineWidth = 2; tx.beginPath(); tx.moveTo(nowX, pad - 8); tx.lineTo(nowX, H - pad + 8); tx.stroke(); tx.lineWidth = 1;
   }
 
-  // ── Vocals (pitch meter / piano-roll) ────────────────────────────────────────
   function drawVocals(t) {
     const [W, H] = frameSize(vocalStage, vc);
     vc.clearRect(0, 0, W, H);
-    if (!vocals.length) {
+    if (!vocals.length && !vpitch.length) {
       vc.fillStyle = "#8f99ab"; vc.font = "14px system-ui"; vc.textAlign = "center"; vc.textBaseline = "middle";
       vc.fillText("No vocals detected for this song.", W / 2, H / 2); vc.textAlign = "left"; return;
     }
-    const nowX = Math.round(W * NOW), padT = 14, padB = 14;
+    const nowX = Math.round(W * NOW), padT = 16, padB = 16;
     const span = Math.max(1, vhi - vlo);
     const yOf = (p) => padT + (H - padT - padB) * (1 - (p - vlo) / span);
     const noteH = Math.min(20, Math.max(7, (H - padT - padB) / span * 0.85));
     const tStart = t - nowX / PPS, tEnd = t + (W - nowX) / PPS;
 
-    // octave reference lines (each C), labelled
     vc.font = "10px system-ui"; vc.textBaseline = "middle";
     for (let p = Math.ceil(vlo / 12) * 12; p <= vhi; p += 12) {
       const y = yOf(p);
       vc.strokeStyle = "rgba(255,255,255,0.08)"; vc.beginPath(); vc.moveTo(0, y); vc.lineTo(W, y); vc.stroke();
       vc.fillStyle = "#8f99ab"; vc.textAlign = "left"; vc.fillText("C" + (p / 12 - 1), 6, y);
     }
-    // beat grid
     if (beats.length) { vc.strokeStyle = "rgba(255,255,255,0.04)"; for (const b of beats) { const x = nowX + (b - t) * PPS; if (x < 0 || x > W) continue; vc.beginPath(); vc.moveTo(x, padT); vc.lineTo(x, H - padB); vc.stroke(); } }
 
-    // notes
+    // quantized note bars (the "blocks")
     vc.font = "bold 10px system-ui"; vc.textAlign = "center";
     let curName = null;
     for (let i = Math.max(0, lower(vocals, tStart) - 10); i < vocals.length; i++) {
@@ -322,51 +421,53 @@
       const x = nowX + (n.start - t) * PPS, w = Math.max(8, n.duration * PPS), y = yOf(n.pitch);
       const active = n.start <= t && t <= n.start + n.duration;
       if (active) curName = n.name;
-      vc.fillStyle = active ? "#ffffff" : "#3aa7ff";
+      vc.fillStyle = active ? "#ffd9a8" : "rgba(255,159,28,0.55)";
       roundRect(vc, x, y - noteH / 2, w, noteH, 3); vc.fill();
       if (w > 22 && noteH >= 11) { vc.fillStyle = INK; vc.fillText(n.name, x + Math.min(w / 2, 16), y); }
     }
+
+    // continuous pitch line (vibrato / slides — the actual voice)
+    if (vpitch.length) {
+      vc.strokeStyle = "#ffffff"; vc.lineWidth = 2; vc.beginPath();
+      let pen = false;
+      for (let i = 0; i < vpitch.length; i++) {
+        const pt = vpitch[i], pt_t = pt[0], mid = pt[1];
+        if (pt_t < tStart) continue; if (pt_t > tEnd) break;
+        if (mid == null) { pen = false; continue; }
+        const x = nowX + (pt_t - t) * PPS, y = yOf(mid);
+        if (!pen) { vc.moveTo(x, y); pen = true; } else vc.lineTo(x, y);
+      }
+      vc.stroke(); vc.lineWidth = 1;
+    }
     vc.textAlign = "left";
-    // now-line
     vc.strokeStyle = NOWLINE; vc.lineWidth = 2; vc.beginPath(); vc.moveTo(nowX, padT); vc.lineTo(nowX, H - padB); vc.stroke(); vc.lineWidth = 1;
-    // current pitch readout
-    if (curName) { vc.fillStyle = "#3aa7ff"; vc.font = "bold 22px system-ui"; vc.textAlign = "left"; vc.fillText(curName, nowX + 10, padT + 16); }
+    if (curName) { vc.fillStyle = "#ff9f1c"; vc.font = "bold 22px system-ui"; vc.textAlign = "left"; vc.fillText(curName, nowX + 10, padT + 16); }
   }
 
-  // ── Chords grid highlight ────────────────────────────────────────────────────
   let lastName = "";
   function updateGrid(t) {
     const cur = chordAt(t), name = cur ? cur.name : "";
-    if (name === lastName) return;
-    lastName = name;
+    if (name === lastName) return; lastName = name;
     for (const card of $("chordGrid").children) card.classList.toggle("active", card.dataset.name === name);
   }
 
-  // ── Main loop ────────────────────────────────────────────────────────────────
+  // ── Loop ──────────────────────────────────────────────────────────────────
   function frame() {
     requestAnimationFrame(frame);
     if (!tab) return;
-    // Compensate for audio output latency so the sounding note sits on the line.
     const lat = (actx && playing) ? (actx.outputLatency || actx.baseLatency || 0) * rate : 0;
     const t = songTime() - lat;
-    // loop
-    if (playing && loopA != null && loopB != null && t >= loopB) { seekTo(loopA); }
-    // metronome
+    if (playing && loopA != null && loopB != null && t >= loopB) seekTo(loopA);
     if (playing && metro && beats.length) {
       const ahead = ctx().currentTime;
-      while (metroIdx < beats.length) {
-        const bt = beats[metroIdx];
-        if (bt < t - 0.05) { metroIdx++; continue; }
-        if (bt < t + 0.2) { click(ahead + (bt - t) / rate); metroIdx++; } else break;
-      }
+      while (metroIdx < beats.length) { const bt = beats[metroIdx]; if (bt < t - 0.05) { metroIdx++; continue; } if (bt < t + 0.2) { click(ahead + (bt - t) / rate); metroIdx++; } else break; }
     }
-    // Idle when paused and nothing changed, so the page can settle.
     if (!playing && !dirty) return;
     dirty = false;
     if (view === "player") drawPlayer(t);
     else if (view === "tab") drawTab(t);
     else if (view === "vocals") drawVocals(t);
-    else updateGrid(t);
+    else if (view === "chords") updateGrid(t);
     if (!seeking) $("seek").value = duration ? Math.round(t / duration * 1000) : 0;
     $("time").textContent = fmt(t) + " / " + fmt(duration);
   }
@@ -378,8 +479,14 @@
   window.addEventListener("resize", () => { dirty = true; });
   $("jobSelect").onchange = (e) => loadJob(e.target.value);
   $("speedSel").onchange = (e) => { rate = parseFloat(e.target.value); if (playing) play(songTime()); };
+  $("capoSel").onchange = (e) => { capo = parseInt(e.target.value, 10) || 0; updateCapoBadge(); buildChordGrid(); buildLearn(); dirty = true; };
 
-  function setView(v) { view = v; for (const b of $("viewSeg").children) b.classList.toggle("active", b.dataset.view === v); $("playerView").classList.toggle("hidden", v !== "player"); $("chordsView").classList.toggle("hidden", v !== "chords"); $("tabView").classList.toggle("hidden", v !== "tab"); $("vocalsView").classList.toggle("hidden", v !== "vocals"); lastName = ""; dirty = true; }
+  function setView(v) {
+    view = v;
+    for (const b of $("viewSeg").children) b.classList.toggle("active", b.dataset.view === v);
+    for (const id of ["player", "chords", "tab", "vocals", "learn"]) $(id + "View").classList.toggle("hidden", id !== v);
+    lastName = ""; dirty = true;
+  }
   $("viewSeg").onclick = (e) => { if (e.target.dataset.view) setView(e.target.dataset.view); };
   $("contentSeg").onclick = (e) => { const c = e.target.dataset.content; if (!c) return; content = c === "all" ? "both" : c; for (const b of $("contentSeg").children) b.classList.toggle("active", b.dataset.content === e.target.dataset.content); dirty = true; };
 
@@ -390,30 +497,40 @@
     else { loopA = loopB = null; btn.textContent = "Loop"; btn.classList.remove("on"); }
   };
   $("metroBtn").onclick = () => { metro = !metro; $("metroBtn").classList.toggle("on", metro); };
-  $("capoBtn").onclick = () => {
-    if (capo === 0) return;
-    useCapo = !useCapo;
-    $("capoBtn").textContent = useCapo ? `Capo ${capo}` : "No capo";
-    $("capoBtn").classList.toggle("on", useCapo);
-    buildChordGrid();
-    dirty = true;
-  };
+
+  // library modal
+  async function openLibrary() {
+    const jobs = await getJobs();
+    const list = $("libraryList"); list.innerHTML = "";
+    if (!jobs.length) list.innerHTML = "<p class='muted'>No songs yet. Add one with a YouTube link or upload.</p>";
+    for (const j of jobs) {
+      const row = document.createElement("div"); row.className = "libRow";
+      row.innerHTML = `<div class="libName">${j.name}<span class="libStat">${j.status}</span></div>`;
+      const load = document.createElement("button"); load.textContent = "Open"; load.onclick = () => { $("libraryModal").classList.add("hidden"); $("jobSelect").value = j.id; loadJob(j.id); };
+      const del = document.createElement("button"); del.className = "danger"; del.textContent = "Delete";
+      del.onclick = async () => { await fetch(`/api/jobs/${j.id}`, { method: "DELETE" }); await refreshJobs(); openLibrary(); };
+      row.append(load, del); list.appendChild(row);
+    }
+    $("libraryModal").classList.remove("hidden");
+  }
+  $("libraryBtn").onclick = openLibrary;
+  $("libClose").onclick = () => $("libraryModal").classList.add("hidden");
+  $("libraryModal").onclick = (e) => { if (e.target.id === "libraryModal") $("libraryModal").classList.add("hidden"); };
 
   document.addEventListener("keydown", (e) => {
+    if (e.target.tagName === "INPUT") return;
     if (e.code === "Space") { e.preventDefault(); toggle(); }
     else if (e.code === "ArrowRight") seekTo(songTime() + 5);
     else if (e.code === "ArrowLeft") seekTo(songTime() - 5);
   });
 
   async function init() {
-    watchCanvas(stage);
-    watchCanvas(tabStage);
-    watchCanvas(vocalStage);
+    watchCanvas(stage); watchCanvas(tabStage); watchCanvas(vocalStage);
     requestAnimationFrame(frame);
     const jobs = await refreshJobs();
     const done = jobs.find((j) => j.status === "done");
     if (done) { $("jobSelect").value = done.id; await loadJob(done.id); }
-    else $("status").textContent = "Upload a song to begin.";
+    else $("status").textContent = "Add a song — paste a YouTube link or upload a file.";
   }
   init();
 })();

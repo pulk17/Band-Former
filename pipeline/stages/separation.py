@@ -69,34 +69,38 @@ def separate_guitar(audio_path: str | Path) -> SeparationResult:
     separator = _get_separator(stem_output_dir)
 
     logger.info("Running HTDemucs separation...")
-    output_files = separator.separate(str(audio_path))
+    try:
+        output_files = separator.separate(str(audio_path))
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            f"Source separation failed on '{audio_path.name}': {exc}. "
+            f"Is the file a valid, decodable audio file?"
+        ) from exc
 
     elapsed = time.time() - start_time
     logger.info("Separation completed in %.1f seconds", elapsed)
 
-    # Prefer a stem explicitly named "guitar"; fall back to "other" (which is
-    # where guitar usually lands in 4-stem models) so a model that names its
-    # stems differently still produces usable output instead of crashing.
+    # Discover stems from disk (the return value's shape varies by version and
+    # can be empty even on success). Prefer a "guitar" stem; fall back to "other".
+    stems = sorted(stem_output_dir.glob("*.wav"))
+
     def _match_stem(keyword: str) -> Path | None:
-        for file_path in output_files:
-            file_name = Path(file_path).name
-            if keyword in file_name.lower():
-                return stem_output_dir / file_name
+        for p in stems:
+            if keyword in p.name.lower():
+                return p
         return None
 
     guitar_stem_path = _match_stem("guitar")
     if guitar_stem_path is None:
         guitar_stem_path = _match_stem("other")
         if guitar_stem_path is not None:
-            logger.warning(
-                "No 'guitar' stem found; falling back to 'other' stem: %s",
-                guitar_stem_path.name,
-            )
+            logger.warning("No 'guitar' stem; falling back to 'other': %s", guitar_stem_path.name)
 
     if guitar_stem_path is None:
-        available = [Path(f).name for f in output_files]
         raise RuntimeError(
-            f"Guitar stem not found. Available stems: {available}"
+            f"Separation produced no usable stem for '{audio_path.name}'. "
+            f"Files written: {[p.name for p in stems]} "
+            f"(separator returned {len(output_files or [])} items)."
         )
 
     size_mb = guitar_stem_path.stat().st_size / (1024 * 1024)

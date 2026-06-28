@@ -11,7 +11,10 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
-from pipeline import separate_guitar, extract_beats, extract_notes, BeatResult
+from pipeline import (
+    separate_guitar, extract_beats, extract_notes,
+    extract_vocals, extract_vocal_contour, BeatResult,
+)
 
 _NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
@@ -125,14 +128,16 @@ def process_audio(audio_path: Path | str) -> Path:
             from arrange import clean_monophonic
             vstem = next(iter(out_dir.glob("*[Vv]ocals*.wav")), None)
             if vstem:
-                vnotes = extract_notes(vstem)
+                vnotes = extract_vocals(vstem)
                 vdicts = [{"start": n.start_time, "end": n.end_time, "pitch": n.pitch,
                            "duration": n.end_time - n.start_time, "name": midi_to_name(n.pitch)}
                           for n in vnotes]
                 data = json.loads(tab_json.read_text())
                 data["vocals"] = clean_monophonic(vdicts)
+                data["vocal_pitch"] = extract_vocal_contour(vstem)   # continuous f0 line
                 tab_json.write_text(json.dumps(data, indent=2))
-                print(f"  ✓ Vocals   : {len(data['vocals'])} pitch notes")
+                print(f"  ✓ Vocals   : {len(data['vocals'])} notes + "
+                      f"{sum(1 for p in data['vocal_pitch'] if p[1] is not None)} pitch pts")
         except Exception as exc:  # noqa: BLE001
             print(f"  ⚠ Vocals transcription failed: {exc}")
 
