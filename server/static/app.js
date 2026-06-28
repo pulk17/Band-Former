@@ -583,8 +583,16 @@
     if (!jobs.length) list.innerHTML = "<p class='muted'>No songs yet. Add one with a YouTube link or upload.</p>";
     for (const j of jobs) {
       const row = document.createElement("div"); row.className = "libRow";
-      row.innerHTML = `<div class="libName">${j.name}<span class="libStat">${j.status}</span></div>`;
+      row.innerHTML = `<div class="libName"><span class="nm" title="${j.name}">${j.name}</span><span class="libStat">${j.status}</span></div>`;
       const load = document.createElement("button"); load.textContent = "Open"; load.onclick = () => { $("libraryModal").classList.add("hidden"); $("jobSelect").value = j.id; loadJob(j.id); };
+      const rename = document.createElement("button"); rename.textContent = "Rename";
+      rename.onclick = async () => {
+        const name = prompt("Rename song to:", j.name);
+        if (!name || name.trim() === j.name) return;
+        const r = await fetch(`/api/rename/${j.id}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: name.trim() }) });
+        if (!r.ok) { let d = ""; try { d = (await r.json()).detail; } catch (e) {} alert("Rename failed: " + (d || r.status)); return; }
+        await refreshJobs(); openLibrary();
+      };
       const reprocess = document.createElement("button"); reprocess.textContent = "Reprocess";
       reprocess.onclick = () => {
         $("libraryModal").classList.add("hidden");
@@ -607,7 +615,7 @@
           $("overlayMsg").textContent = ""; $("status").textContent = "Delete failed: " + e.message;
         }
       };
-      row.append(load, reprocess, del); list.appendChild(row);
+      row.append(load, rename, reprocess, del); list.appendChild(row);
     }
     $("libraryModal").classList.remove("hidden");
   }

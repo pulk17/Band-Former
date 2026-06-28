@@ -363,6 +363,40 @@ def _force_rm(path: Path) -> None:
     shutil.rmtree(path, onerror=onerr)
 
 
+class RenameRequest(BaseModel):
+    name: str
+
+
+@app.post("/api/rename/{job_id}")
+def rename_job(job_id: str, req: RenameRequest) -> dict:
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "unknown job")
+    new_stem = _safe_stem(req.name)
+    if not new_stem:
+        raise HTTPException(400, "invalid name")
+    if new_stem == job.song_stem:
+        with _lock:
+            job.name = req.name
+        return {"ok": True, "job_id": job_id}
+    if (OUTPUT_DIR / new_stem).exists() or any((INPUT_DIR / f"{new_stem}{e}").exists() for e in AUDIO_EXTS):
+        raise HTTPException(409, "a song with that name already exists")
+
+    for ext in AUDIO_EXTS:                       # rename the source audio
+        src = INPUT_DIR / f"{job.song_stem}{ext}"
+        if src.exists():
+            src.rename(INPUT_DIR / f"{new_stem}{ext}")
+    old_dir = OUTPUT_DIR / job.song_stem         # rename the output folder
+    if old_dir.is_dir():
+        old_dir.rename(OUTPUT_DIR / new_stem)
+
+    with _lock:
+        _jobs.pop(job_id, None)
+        _jobs[new_stem] = Job(id=new_stem, name=req.name, song_stem=new_stem,
+                              status=job.status, stage=job.stage)
+    return {"ok": True, "job_id": new_stem}
+
+
 @app.delete("/api/jobs/{job_id}")
 def delete_job(job_id: str) -> dict:
     job = _jobs.get(job_id)

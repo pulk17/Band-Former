@@ -246,3 +246,11 @@ button.danger:hover { background: #2a1818; border-color: #ff7a6b; }
 .ni-in { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 
 #smoothBtn.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 700; }
+
+/* ── Library rows: long names ellipsize, buttons stay visible ── */
+.modalCard { overflow: hidden; }
+.libraryList { overflow-y: auto; max-height: 72vh; }
+.libRow { overflow: hidden; }
+.libName { flex: 1; min-width: 0; }
+.libName .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+.libRow button { flex: none; padding: 6px 11px; font-size: 12px; }
