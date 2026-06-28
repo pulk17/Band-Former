@@ -19,8 +19,17 @@ import json
 import queue
 import re
 import shutil
+import sys
 import threading
 import uuid
+
+# The pipeline prints ✓/✗/→; on Windows the default cp1252 console can't encode
+# them and raises UnicodeEncodeError mid-job. Force UTF-8 (replace on failure).
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
@@ -267,22 +276,38 @@ def audio(job_id: str) -> FileResponse:
     return FileResponse(src)
 
 
+def _force_rm(path: Path) -> None:
+    """rmtree that survives read-only / transiently-locked files on Windows."""
+    import os, stat
+    def onerr(func, p, _exc):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except Exception:
+            pass
+    shutil.rmtree(path, onerror=onerr)
+
+
 @app.delete("/api/jobs/{job_id}")
 def delete_job(job_id: str) -> dict:
     job = _jobs.get(job_id)
     if not job:
         raise HTTPException(404, "unknown job")
+    with _lock:                                   # drop from the list first
+        _jobs.pop(job_id, None)
+    err = None
     d = _output_dir_for(job.song_stem)
-    if d.is_dir():
-        shutil.rmtree(d, ignore_errors=True)
+    try:
+        if d.is_dir():
+            _force_rm(d)
+    except Exception as exc:  # noqa: BLE001
+        err = str(exc)
     for ext in AUDIO_EXTS:
         p = INPUT_DIR / f"{job.song_stem}{ext}"
         if p.exists():
             try: p.unlink()
             except OSError: pass
-    with _lock:
-        _jobs.pop(job_id, None)
-    return {"ok": True}
+    return {"ok": err is None, "error": err, "still_exists": d.exists()}
 
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

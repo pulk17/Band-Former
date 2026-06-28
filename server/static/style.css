@@ -184,3 +184,10 @@ button.danger:hover { background: #2a1818; border-color: #ff7a6b; }
 .prog { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; font-size: 16px; }
 .prog span { background: var(--surface-2); border: 1px solid var(--border); border-radius: 7px; padding: 4px 10px; font-weight: 600; }
 .prog i { color: var(--muted); font-style: normal; margin: 0 2px; }
+
+/* header never hides controls; Upload stays visible */
+.topbar { flex-wrap: wrap; row-gap: 8px; }
+.adder input[type=url] { width: 190px; }
+.upload { white-space: nowrap; }
+.upload:hover { border-color: var(--accent); }
+@media (max-width: 1100px) { .adder input[type=url] { width: 150px; } .badges { order: 5; } }

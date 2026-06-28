@@ -508,7 +508,20 @@
       row.innerHTML = `<div class="libName">${j.name}<span class="libStat">${j.status}</span></div>`;
       const load = document.createElement("button"); load.textContent = "Open"; load.onclick = () => { $("libraryModal").classList.add("hidden"); $("jobSelect").value = j.id; loadJob(j.id); };
       const del = document.createElement("button"); del.className = "danger"; del.textContent = "Delete";
-      del.onclick = async () => { await fetch(`/api/jobs/${j.id}`, { method: "DELETE" }); await refreshJobs(); openLibrary(); };
+      del.onclick = async () => {
+        del.disabled = true; del.textContent = "…";
+        try {
+          const r = await fetch(`/api/jobs/${j.id}`, { method: "DELETE" });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(d.detail || ("HTTP " + r.status));
+          if (d.still_exists) throw new Error("files in use — close players and retry");
+          row.remove();
+          await refreshJobs();
+        } catch (e) {
+          del.disabled = false; del.textContent = "Delete";
+          $("overlayMsg").textContent = ""; $("status").textContent = "Delete failed: " + e.message;
+        }
+      };
       row.append(load, del); list.appendChild(row);
     }
     $("libraryModal").classList.remove("hidden");
