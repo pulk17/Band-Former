@@ -73,7 +73,24 @@
   }
 
   // ── Overlay ───────────────────────────────────────────────────────────────
-  const showOverlay = (msg, sub) => { $("overlayMsg").textContent = msg; $("overlaySub").textContent = sub || ""; $("overlay").classList.remove("hidden"); };
+  const STEP_ORDER = ["starting", "Separating stems", "Tracking beats", "Transcribing notes", "Building tab", "Arranging", "Extracting vocals"];
+
+  function showOverlay(msg, sub, stage) {
+    $("overlayMsg").textContent = msg;
+    $("overlaySub").textContent = sub || "";
+    $("overlay").classList.remove("hidden");
+    updateSteps(stage);
+  }
+  function updateSteps(currentStage) {
+    const idx = STEP_ORDER.indexOf(currentStage);
+    document.querySelectorAll(".pStep").forEach((el) => {
+      const stepIdx = STEP_ORDER.indexOf(el.dataset.step);
+      el.classList.remove("done", "active");
+      if (idx < 0) return;                 // unknown stage (e.g. reprocess skip) — leave neutral
+      if (stepIdx < idx) el.classList.add("done");
+      else if (stepIdx === idx) el.classList.add("active");
+    });
+  }
   const hideOverlay = () => $("overlay").classList.add("hidden");
 
   // ── Jobs / library ──────────────────────────────────────────────────────────
@@ -140,6 +157,9 @@
     const f = e.target.files[0]; if (!f) return;
     showOverlay("Uploading…", f.name);
     const fd = new FormData(); fd.append("file", f); fd.append("instrument", $("instSel").value);
+    fd.append("run_beats", $("optBeats").checked);
+    fd.append("run_vocals", $("optVocals").checked);
+    fd.append("vocal_model", $("optVocalModel").value);
     const r = await fetch("/api/transcribe", { method: "POST", body: fd });
     e.target.value = "";
     if (!r.ok) { showOverlay("Upload failed", await r.text()); return; }
@@ -149,23 +169,27 @@
     const url = $("ytInput").value.trim(); if (!url) return;
     showOverlay("Fetching from YouTube…", url);
     const r = await fetch("/api/transcribe/youtube", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url, instrument: $("instSel").value }),
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+        url,
+        instrument: $("instSel").value,
+        run_beats: $("optBeats").checked,
+        run_vocals: $("optVocals").checked,
+        vocal_model: $("optVocalModel").value
+      }),
     });
     if (!r.ok) { let d = ""; try { d = (await r.json()).detail; } catch (e) {} showOverlay("YouTube failed", d || `HTTP ${r.status}`); return; }
     $("ytInput").value = "";
     poll((await r.json()).job_id);
   });
 
-  const STAGES = { processing: "Separating stems → tracking beats → transcribing → building tab", cached: "Loading cached result", queued: "Queued…" };
   async function poll(id) {
     let s;
     try { s = await (await fetch(`/api/status/${id}`)).json(); }
     catch (e) { showOverlay("Lost connection", String(e)); return; }
     if (s.status === "done") { hideOverlay(); await refreshJobs(id); $("jobSelect").value = id; return loadJob(id); }
     if (s.status === "error") { showOverlay("Processing failed", (s.error || "").split("\n").filter(Boolean).pop() || "unknown error"); return; }
-    showOverlay(s.status === "cached" ? "Loading…" : "Transcribing… (first time only, ~1–3 min)",
-                STAGES[s.status] || s.stage || s.status);
-    setTimeout(() => poll(id), 1500);
+    showOverlay("Processing", s.stage || "Starting...", s.stage);
+    setTimeout(() => poll(id), 1200);
   }
 
   // ── Chord diagram (SVG) ─────────────────────────────────────────────────────
@@ -507,6 +531,13 @@
       const row = document.createElement("div"); row.className = "libRow";
       row.innerHTML = `<div class="libName">${j.name}<span class="libStat">${j.status}</span></div>`;
       const load = document.createElement("button"); load.textContent = "Open"; load.onclick = () => { $("libraryModal").classList.add("hidden"); $("jobSelect").value = j.id; loadJob(j.id); };
+      const reprocess = document.createElement("button"); reprocess.textContent = "Reprocess";
+      reprocess.onclick = () => {
+        $("libraryModal").classList.add("hidden");
+        settingsReprocessJobId = j.id;
+        $("runSettingsBtn").textContent = "Apply & Run";
+        $("settingsModal").classList.remove("hidden");
+      };
       const del = document.createElement("button"); del.className = "danger"; del.textContent = "Delete";
       del.onclick = async () => {
         del.disabled = true; del.textContent = "…";
@@ -522,13 +553,44 @@
           $("overlayMsg").textContent = ""; $("status").textContent = "Delete failed: " + e.message;
         }
       };
-      row.append(load, del); list.appendChild(row);
+      row.append(load, reprocess, del); list.appendChild(row);
     }
     $("libraryModal").classList.remove("hidden");
   }
   $("libraryBtn").onclick = openLibrary;
   $("libClose").onclick = () => $("libraryModal").classList.add("hidden");
   $("libraryModal").onclick = (e) => { if (e.target.id === "libraryModal") $("libraryModal").classList.add("hidden"); };
+
+  // settings modal
+  let settingsReprocessJobId = null;
+  $("settingsBtn").onclick = () => {
+    settingsReprocessJobId = null;
+    $("runSettingsBtn").textContent = "Save (applies to next add)";
+    $("settingsModal").classList.remove("hidden");
+  };
+  $("settingsClose").onclick = () => $("settingsModal").classList.add("hidden");
+  $("settingsModal").onclick = (e) => { if (e.target.id === "settingsModal") $("settingsModal").classList.add("hidden"); };
+
+  $("runSettingsBtn").onclick = async () => {
+    $("settingsModal").classList.add("hidden");
+    if (settingsReprocessJobId) {
+      showOverlay("Reprocessing…", "");
+      const r = await fetch(`/api/reprocess/${settingsReprocessJobId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          run_beats: $("optBeats").checked,
+          run_vocals: $("optVocals").checked,
+          vocal_model: $("optVocalModel").value
+        })
+      });
+      if (!r.ok) {
+        let d = ""; try { d = (await r.json()).detail; } catch (e) {}
+        showOverlay("Reprocess failed", d || `HTTP ${r.status}`); return;
+      }
+      poll(settingsReprocessJobId);
+    }
+  };
 
   document.addEventListener("keydown", (e) => {
     if (e.target.tagName === "INPUT") return;

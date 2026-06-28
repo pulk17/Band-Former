@@ -70,7 +70,7 @@ class Job:
 
 _jobs: dict[str, Job] = {}
 _lock = threading.Lock()
-_queue: "queue.Queue[tuple[str, Path, str]]" = queue.Queue()
+_queue: "queue.Queue[tuple[str, Path, str, dict]]" = queue.Queue()
 
 
 def _processed_instrument(stem: str) -> str | None:
@@ -157,21 +157,24 @@ def _seed_existing_jobs() -> None:
 def _worker() -> None:
     """Single background worker: processes jobs sequentially, in-process, so the
     ML models loaded by the pipeline stages stay warm across uploads."""
-    from run_pipeline import process_audio   # imported here so server startup stays light
+    from run_pipeline import process_audio
     while True:
-        job_id, audio_path, instrument = _queue.get()
+        job_id, audio_path, instrument, options = _queue.get()
         with _lock:
             _jobs[job_id].status = "processing"
-            _jobs[job_id].stage = f"separating {instrument} → beats → transcribing → engine"
+            _jobs[job_id].stage = "starting"
+        def on_stage(stage_name: str):
+            with _lock:
+                _jobs[job_id].stage = stage_name
         try:
-            process_audio(audio_path, instrument)
+            process_audio(audio_path, instrument, on_stage=on_stage, options=options)
             tab = _output_dir_for(audio_path.stem) / "tab.json"
             with _lock:
                 if tab.exists():
                     _jobs[job_id].status = "done"; _jobs[job_id].stage = "complete"
                 else:
                     _jobs[job_id].status = "error"; _jobs[job_id].error = "no tab produced"
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             with _lock:
                 _jobs[job_id].status = "error"; _jobs[job_id].error = str(exc)[-2000:]
         finally:
@@ -202,7 +205,13 @@ def index() -> FileResponse:
 
 
 @app.post("/api/transcribe")
-async def transcribe(file: UploadFile = File(...), instrument: str = Form("guitar")) -> JSONResponse:
+async def transcribe(
+    file: UploadFile = File(...), 
+    instrument: str = Form("guitar"),
+    run_beats: bool = Form(True),
+    run_vocals: bool = Form(True),
+    vocal_model: str = Form("auto")
+) -> JSONResponse:
     suffix = Path(file.filename or "upload.mp3").suffix.lower()
     if suffix not in AUDIO_EXTS:
         raise HTTPException(400, f"Unsupported audio type: {suffix}")
@@ -220,13 +229,20 @@ async def transcribe(file: UploadFile = File(...), instrument: str = Form("guita
 
     with _lock:
         _jobs[job_id] = Job(id=job_id, name=stem, song_stem=stem)
-    _queue.put((job_id, dest, instrument))
+    _queue.put((job_id, dest, instrument, {
+        "run_beats": run_beats,
+        "run_vocals": run_vocals,
+        "vocal_model": vocal_model
+    }))
     return JSONResponse({"job_id": job_id})
 
 
 class YouTubeRequest(BaseModel):
     url: str
     instrument: str = "guitar"
+    run_beats: bool = True
+    run_vocals: bool = True
+    vocal_model: str = "auto"
 
 @app.post("/api/transcribe/youtube")
 def transcribe_youtube(req: YouTubeRequest) -> JSONResponse:
@@ -254,7 +270,46 @@ def transcribe_youtube(req: YouTubeRequest) -> JSONResponse:
     with _lock:
         _jobs[job_id] = job
 
-    _queue.put((job_id, dest, req.instrument))
+    _queue.put((job_id, dest, req.instrument, {
+        "run_beats": req.run_beats,
+        "run_vocals": req.run_vocals,
+        "vocal_model": req.vocal_model
+    }))
+    return JSONResponse({"job_id": job_id})
+
+
+class ReprocessRequest(BaseModel):
+    run_beats: bool = True
+    run_vocals: bool = True
+    vocal_model: str = "auto"
+
+
+@app.post("/api/reprocess/{job_id}")
+def reprocess_job(job_id: str, req: ReprocessRequest) -> JSONResponse:
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "unknown job")
+    
+    with _lock:
+        job.status = "queued"
+        job.stage = "starting"
+        job.error = ""
+        
+    src = _find_source_audio(job.song_stem)
+    audio_path = src if src else (INPUT_DIR / f"{job_id}.mp3")
+    instrument = _processed_instrument(job.song_stem) or "guitar"
+    
+    _queue.put((
+        job_id, 
+        audio_path, 
+        instrument, 
+        {
+            "run_beats": req.run_beats, 
+            "run_vocals": req.run_vocals, 
+            "vocal_model": req.vocal_model, 
+            "reprocess": True
+        }
+    ))
     return JSONResponse({"job_id": job_id})
 
 

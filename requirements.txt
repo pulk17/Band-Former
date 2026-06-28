@@ -49,6 +49,7 @@ scipy
 librosa
 soundfile
 yt-dlp
+torchcrepe
 
 # Web app (FastAPI backend + Canvas frontend)
 fastapi

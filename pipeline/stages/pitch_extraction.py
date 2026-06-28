@@ -103,54 +103,86 @@ def extract_notes(audio_path: Path | str) -> list[NoteEvent]:
     return notes
 
 
-def extract_vocals(audio_path: Path | str) -> list[NoteEvent]:
-    """
-    Transcribe a vocals stem WAV into a monophonic list of NoteEvents using librosa.pyin.
+def extract_vocals(audio_path: Path | str, model_choice: str = "auto") -> list[NoteEvent]:
+    """Transcribe a vocals stem WAV into a monophonic list of NoteEvents.
+    
+    Uses CREPE (GPU-accelerated neural pitch tracker) or pYIN.
     """
     audio_path = Path(audio_path)
     if not audio_path.exists():
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-    import librosa
-    import numpy as np
+    if model_choice == "crepe":
+        return _extract_vocals_crepe(audio_path)
+    elif model_choice == "pyin":
+        return _extract_vocals_pyin(audio_path)
+    
+    # "auto" fallback
+    try:
+        return _extract_vocals_crepe(audio_path)
+    except ImportError:
+        logger.info("torchcrepe not available, falling back to pYIN.")
+        return _extract_vocals_pyin(audio_path)
 
-    logger.info("Loading vocals '%s' for pYIN...", audio_path.name)
-    y, sr = librosa.load(str(audio_path), sr=None, mono=True)
 
-    logger.info("Running pYIN pitch tracking on vocals...")
-    f0, voiced_flag, voiced_probs = librosa.pyin(
-        y, 
-        fmin=librosa.note_to_hz('C2'), 
-        fmax=librosa.note_to_hz('C7'),
-        sr=sr
+def _extract_vocals_crepe(audio_path: Path) -> list[NoteEvent]:
+    """GPU-accelerated vocal pitch tracking via CREPE."""
+    import torch
+    import torchcrepe
+    import torchaudio
+
+    logger.info("Loading vocals '%s' for CREPE...", audio_path.name)
+    audio, sr = torchaudio.load(str(audio_path))
+    # CREPE expects 16kHz mono
+    if audio.shape[0] > 1:
+        audio = audio.mean(dim=0, keepdim=True)
+    if sr != 16000:
+        audio = torchaudio.functional.resample(audio, sr, 16000)
+        sr = 16000
+
+    device = DEVICE if DEVICE.type == "cuda" else torch.device("cpu")
+    logger.info("Running CREPE pitch tracking (device: %s)...", device)
+
+    # Predict pitch with CREPE
+    hop_length = 160  # 10ms at 16kHz
+    pitch, periodicity = torchcrepe.predict(
+        audio, sr, hop_length,
+        fmin=65.0,   # C2
+        fmax=2093.0, # C7
+        model='tiny',
+        batch_size=512,
+        device=device,
+        return_periodicity=True,
     )
 
+    pitch = pitch.squeeze().cpu().numpy()
+    periodicity = periodicity.squeeze().cpu().numpy()
+
+    import numpy as np
+    import librosa
+
+    times = np.arange(len(pitch)) * hop_length / sr
+    voiced = periodicity > 0.5
+
     notes: list[NoteEvent] = []
-    if f0 is None:
-        return notes
-
-    hop_length = 512
-    times = librosa.times_like(f0, sr=sr, hop_length=hop_length)
-
     current_note = None
-    
-    for i, freq in enumerate(f0):
-        if voiced_flag[i] and not np.isnan(freq):
-            pitch = int(round(librosa.hz_to_midi(freq)))
+
+    for i in range(len(pitch)):
+        if voiced[i] and pitch[i] > 0:
+            midi = int(round(librosa.hz_to_midi(float(pitch[i]))))
             if current_note is None:
-                current_note = {"start": times[i], "pitch": pitch, "end": times[i]}
+                current_note = {"start": times[i], "pitch": midi, "end": times[i]}
+            elif current_note["pitch"] == midi:
+                current_note["end"] = times[i]
             else:
-                if current_note["pitch"] == pitch:
-                    current_note["end"] = times[i]
-                else:
-                    if current_note["end"] > current_note["start"]:
-                        notes.append(NoteEvent(
-                            start_time=float(current_note["start"]),
-                            end_time=float(current_note["end"]),
-                            pitch=current_note["pitch"],
-                            velocity=float(voiced_probs[i-1] if i>0 else 1.0)
-                        ))
-                    current_note = {"start": times[i], "pitch": pitch, "end": times[i]}
+                if current_note["end"] > current_note["start"]:
+                    notes.append(NoteEvent(
+                        start_time=float(current_note["start"]),
+                        end_time=float(current_note["end"]),
+                        pitch=current_note["pitch"],
+                        velocity=float(np.mean(periodicity[max(0,i-5):i]))
+                    ))
+                current_note = {"start": times[i], "pitch": midi, "end": times[i]}
         else:
             if current_note is not None:
                 if current_note["end"] > current_note["start"]:
@@ -161,7 +193,7 @@ def extract_vocals(audio_path: Path | str) -> list[NoteEvent]:
                         velocity=1.0
                     ))
                 current_note = None
-                
+
     if current_note is not None and current_note["end"] > current_note["start"]:
         notes.append(NoteEvent(
             start_time=float(current_note["start"]),
@@ -170,7 +202,71 @@ def extract_vocals(audio_path: Path | str) -> list[NoteEvent]:
             velocity=1.0
         ))
 
-    logger.info("Extracted %d vocal notes.", len(notes))
+    logger.info("CREPE extracted %d vocal notes.", len(notes))
+    return notes
+
+
+def _extract_vocals_pyin(audio_path: Path) -> list[NoteEvent]:
+    """CPU fallback: pYIN at 16kHz for speed."""
+    import librosa
+    import numpy as np
+
+    logger.info("Loading vocals '%s' at 16kHz for pYIN...", audio_path.name)
+    y, sr = librosa.load(str(audio_path), sr=16000, mono=True)
+
+    logger.info("Running pYIN pitch tracking on vocals...")
+    hop_length = 256
+    f0, voiced_flag, voiced_probs = librosa.pyin(
+        y,
+        fmin=librosa.note_to_hz('C2'),
+        fmax=librosa.note_to_hz('C7'),
+        sr=sr,
+        hop_length=hop_length,
+    )
+
+    notes: list[NoteEvent] = []
+    if f0 is None:
+        return notes
+
+    times = librosa.times_like(f0, sr=sr, hop_length=hop_length)
+    current_note = None
+
+    for i, freq in enumerate(f0):
+        if voiced_flag[i] and not np.isnan(freq):
+            pitch = int(round(librosa.hz_to_midi(freq)))
+            if current_note is None:
+                current_note = {"start": times[i], "pitch": pitch, "end": times[i]}
+            elif current_note["pitch"] == pitch:
+                current_note["end"] = times[i]
+            else:
+                if current_note["end"] > current_note["start"]:
+                    notes.append(NoteEvent(
+                        start_time=float(current_note["start"]),
+                        end_time=float(current_note["end"]),
+                        pitch=current_note["pitch"],
+                        velocity=float(voiced_probs[i-1] if i > 0 else 1.0)
+                    ))
+                current_note = {"start": times[i], "pitch": pitch, "end": times[i]}
+        else:
+            if current_note is not None:
+                if current_note["end"] > current_note["start"]:
+                    notes.append(NoteEvent(
+                        start_time=float(current_note["start"]),
+                        end_time=float(current_note["end"]),
+                        pitch=current_note["pitch"],
+                        velocity=1.0
+                    ))
+                current_note = None
+
+    if current_note is not None and current_note["end"] > current_note["start"]:
+        notes.append(NoteEvent(
+            start_time=float(current_note["start"]),
+            end_time=float(current_note["end"]),
+            pitch=current_note["pitch"],
+            velocity=1.0
+        ))
+
+    logger.info("pYIN extracted %d vocal notes.", len(notes))
     return notes
 
 
@@ -190,8 +286,8 @@ def extract_vocal_contour(audio_path: Path | str) -> list[list]:
     import numpy as np
 
     # 22.05 kHz is plenty for a vocal fundamental and ~halves pYIN cost.
-    y, sr = librosa.load(str(audio_path), sr=22050, mono=True)
-    hop_length = 512  # ~23 ms — fine enough to show vibrato
+    y, sr = librosa.load(str(audio_path), sr=16000, mono=True)
+    hop_length = 256
     f0, voiced_flag, _ = librosa.pyin(
         y,
         fmin=librosa.note_to_hz("C2"),

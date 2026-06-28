@@ -30,6 +30,7 @@
         <option value="bass">Bass</option>
         <option value="other">Other</option>
       </select>
+      <button id="settingsBtn" title="Processing Options">⚙</button>
       <input id="ytInput" type="url" placeholder="Paste a YouTube link…" />
       <button id="ytBtn">Add</button>
       <label class="upload" title="Upload an audio file">
@@ -106,9 +107,19 @@
 
     <!-- processing overlay -->
     <div id="overlay" class="overlay hidden">
-      <div class="spinner"></div>
-      <div id="overlayMsg" class="overlayMsg">Working…</div>
-      <div id="overlaySub" class="overlaySub"></div>
+      <div class="progressCard">
+        <div class="progressTitle" id="overlayMsg">Working...</div>
+        <div class="progressSteps" id="progressSteps">
+          <div class="pStep" data-step="starting"><span class="stepDot"></span><span class="stepLabel">Initializing</span></div>
+          <div class="pStep" data-step="Separating stems"><span class="stepDot"></span><span class="stepLabel">Separating stems</span></div>
+          <div class="pStep" data-step="Tracking beats"><span class="stepDot"></span><span class="stepLabel">Tracking beats</span></div>
+          <div class="pStep" data-step="Transcribing notes"><span class="stepDot"></span><span class="stepLabel">Transcribing notes</span></div>
+          <div class="pStep" data-step="Building tab"><span class="stepDot"></span><span class="stepLabel">Building tab</span></div>
+          <div class="pStep" data-step="Arranging"><span class="stepDot"></span><span class="stepLabel">Arranging</span></div>
+          <div class="pStep" data-step="Extracting vocals"><span class="stepDot"></span><span class="stepLabel">Extracting vocals</span></div>
+        </div>
+        <div class="progressSub" id="overlaySub"></div>
+      </div>
     </div>
   </main>
 
@@ -121,6 +132,26 @@
     <div class="modalCard">
       <div class="modalHead"><span>Library</span><button id="libClose">✕</button></div>
       <div id="libraryList" class="libraryList"></div>
+    </div>
+  </div>
+
+  <!-- settings modal -->
+  <div id="settingsModal" class="modal hidden">
+    <div class="modalCard">
+      <div class="modalHead"><span>Processing Options</span><button id="settingsClose">✕</button></div>
+      <div class="settingsForm">
+        <label class="settingRow"><input type="checkbox" id="optBeats" checked> Extract Beats</label>
+        <label class="settingRow"><input type="checkbox" id="optVocals" checked> Extract Vocals</label>
+        <label class="settingRow">
+          Vocal Model:
+          <select id="optVocalModel">
+            <option value="auto">Auto</option>
+            <option value="crepe">CREPE - Fast</option>
+            <option value="pyin">pYIN - Accurate</option>
+          </select>
+        </label>
+        <button id="runSettingsBtn" class="primary">Apply & Run</button>
+      </div>
     </div>
   </div>
 
