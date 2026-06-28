@@ -117,11 +117,11 @@ def extract_vocals(audio_path: Path | str, model_choice: str = "auto") -> list[N
     elif model_choice == "pyin":
         return _extract_vocals_pyin(audio_path)
     
-    # "auto" fallback
+    # "auto" fallback — any CREPE failure (missing dep, TorchCodec, CUDA) -> pYIN
     try:
         return _extract_vocals_crepe(audio_path)
-    except ImportError:
-        logger.info("torchcrepe not available, falling back to pYIN.")
+    except Exception as exc:  # noqa: BLE001
+        logger.info("CREPE unavailable (%s); falling back to pYIN.", exc)
         return _extract_vocals_pyin(audio_path)
 
 
@@ -129,16 +129,12 @@ def _extract_vocals_crepe(audio_path: Path) -> list[NoteEvent]:
     """GPU-accelerated vocal pitch tracking via CREPE."""
     import torch
     import torchcrepe
-    import torchaudio
+    import librosa
 
     logger.info("Loading vocals '%s' for CREPE...", audio_path.name)
-    audio, sr = torchaudio.load(str(audio_path))
-    # CREPE expects 16kHz mono
-    if audio.shape[0] > 1:
-        audio = audio.mean(dim=0, keepdim=True)
-    if sr != 16000:
-        audio = torchaudio.functional.resample(audio, sr, 16000)
-        sr = 16000
+    # librosa (not torchaudio.load, which now needs the TorchCodec backend).
+    y, sr = librosa.load(str(audio_path), sr=16000, mono=True)
+    audio = torch.from_numpy(y).unsqueeze(0)   # [1, samples]
 
     device = DEVICE if DEVICE.type == "cuda" else torch.device("cpu")
     logger.info("Running CREPE pitch tracking (device: %s)...", device)

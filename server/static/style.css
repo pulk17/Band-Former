@@ -231,3 +231,18 @@ button.danger:hover { background: #2a1818; border-color: #ff7a6b; }
 .upload { white-space: nowrap; }
 .upload:hover { border-color: var(--accent); }
 @media (max-width: 1100px) { .adder input[type=url] { width: 150px; } .badges { order: 5; } }
+
+/* ── Compact chord panel: NOW + next 3 with shapes ──────────── */
+.chordPanel { width: 240px; }
+.chordName { font-size: 30px; }
+.diagram { min-height: 128px; }
+.nextLabel { color: var(--muted); font-size: 11px; letter-spacing: 2px; font-weight: 600; margin-top: 2px; }
+.nextList { display: flex; flex-direction: column; gap: 8px; }
+.nextItem { display: flex; align-items: center; gap: 10px; padding: 7px 9px; border-radius: 9px; background: var(--surface-2); border: 1px solid var(--border); }
+.nextItem svg { flex: none; width: 46px; height: auto; }
+.ni-meta { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.ni-meta b { font-size: 15px; }
+.ni-shape { color: var(--accent); font-size: 12px; font-weight: 600; }
+.ni-in { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+
+#smoothBtn.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 700; }
