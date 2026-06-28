@@ -194,7 +194,7 @@ def process_audio(audio_path: Path | str, instrument: str = "guitar", on_stage=N
                               for n in vnotes]
                     data = json.loads(tab_json.read_text())
                     data["vocals"] = clean_monophonic(vdicts)
-                    data["vocal_pitch"] = extract_vocal_contour(vstem)   # continuous f0 line
+                    data["vocal_pitch"] = extract_vocal_contour(vstem, model_choice=vocal_model)
                     tab_json.write_text(json.dumps(data, indent=2))
                     print(f"  ✓ Vocals   : {len(data['vocals'])} notes + "
                           f"{sum(1 for p in data['vocal_pitch'] if p[1] is not None)} pitch pts")

@@ -266,37 +266,66 @@ def _extract_vocals_pyin(audio_path: Path) -> list[NoteEvent]:
     return notes
 
 
-def extract_vocal_contour(audio_path: Path | str) -> list[list]:
-    """
-    Continuous fundamental-frequency contour of a vocals stem via pYIN.
+def extract_vocal_contour(audio_path: Path | str, model_choice: str = "auto") -> list[list]:
+    """Continuous f0 contour [time, midi_float|None] of a vocals stem.
 
-    Returns a list of [time_sec, midi_float] points (midi is None on unvoiced
-    frames). Unlike the quantized note list, this keeps the raw pitch curve —
-    vibrato, slides and scoops — for drawing the "pitch line" over the notes.
+    Keeps the raw pitch curve (vibrato, slides) for the "pitch line". Uses CREPE
+    on the GPU by default (fast); pYIN is the CPU fallback — running pYIN here on
+    a long song is what made the last stage look frozen.
     """
     audio_path = Path(audio_path)
     if not audio_path.exists():
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
+    if model_choice == "pyin":
+        return _contour_pyin(audio_path)
+    try:
+        return _contour_crepe(audio_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("CREPE contour unavailable (%s); falling back to pYIN.", exc)
+        return _contour_pyin(audio_path)
 
+
+def _contour_crepe(audio_path: Path) -> list[list]:
+    import torch
+    import torchcrepe
     import librosa
     import numpy as np
 
-    # 22.05 kHz is plenty for a vocal fundamental and ~halves pYIN cost.
+    logger.info("Vocal contour via CREPE...")
+    y, sr = librosa.load(str(audio_path), sr=16000, mono=True)
+    audio = torch.from_numpy(y).unsqueeze(0)
+    device = DEVICE if DEVICE.type == "cuda" else torch.device("cpu")
+    hop = 160  # 10 ms
+    pitch, periodicity = torchcrepe.predict(
+        audio, sr, hop, fmin=65.0, fmax=2093.0, model="tiny",
+        batch_size=512, device=device, return_periodicity=True,
+    )
+    pitch = pitch.squeeze().cpu().numpy()
+    periodicity = periodicity.squeeze().cpu().numpy()
+    times = np.arange(len(pitch)) * hop / sr
+    out: list[list] = []
+    for t, p, pr in zip(times, pitch, periodicity):
+        voiced = pr > 0.5 and p > 0
+        out.append([round(float(t), 3), round(float(librosa.hz_to_midi(float(p))), 2) if voiced else None])
+    return out
+
+
+def _contour_pyin(audio_path: Path) -> list[list]:
+    import librosa
+    import numpy as np
+
+    logger.info("Vocal contour via pYIN...")
     y, sr = librosa.load(str(audio_path), sr=16000, mono=True)
     hop_length = 256
     f0, voiced_flag, _ = librosa.pyin(
-        y,
-        fmin=librosa.note_to_hz("C2"),
-        fmax=librosa.note_to_hz("C7"),
-        sr=sr,
-        hop_length=hop_length,
+        y, fmin=librosa.note_to_hz("C2"), fmax=librosa.note_to_hz("C7"),
+        sr=sr, hop_length=hop_length,
     )
     times = librosa.times_like(f0, sr=sr, hop_length=hop_length)
-
-    contour: list[list] = []
+    out: list[list] = []
     for t, f, vf in zip(times, f0, voiced_flag):
         if vf and f and not np.isnan(f):
-            contour.append([round(float(t), 3), round(float(librosa.hz_to_midi(f)), 2)])
+            out.append([round(float(t), 3), round(float(librosa.hz_to_midi(f)), 2)])
         else:
-            contour.append([round(float(t), 3), None])
-    return contour
+            out.append([round(float(t), 3), None])
+    return out

@@ -93,10 +93,13 @@
   // ── Overlay ───────────────────────────────────────────────────────────────
   const STEP_ORDER = ["starting", "Separating stems", "Tracking beats", "Transcribing notes", "Building tab", "Arranging", "Extracting vocals"];
 
+  let overlayT0 = 0;
   function showOverlay(msg, sub, stage) {
+    const ov = $("overlay");
+    if (ov.classList.contains("hidden")) overlayT0 = Date.now();   // started now
+    ov.classList.remove("hidden");
     $("overlayMsg").textContent = msg;
     $("overlaySub").textContent = sub || "";
-    $("overlay").classList.remove("hidden");
     updateSteps(stage);
   }
   function updateSteps(currentStage) {
@@ -109,7 +112,8 @@
       else if (stepIdx === idx) el.classList.add("active");
     });
   }
-  const hideOverlay = () => $("overlay").classList.add("hidden");
+  const hideOverlay = () => { $("overlay").classList.add("hidden"); overlayT0 = 0; };
+  const elapsedStr = () => { const e = overlayT0 ? Math.floor((Date.now() - overlayT0) / 1000) : 0; return Math.floor(e / 60) + ":" + String(e % 60).padStart(2, "0"); };
 
   // ── Jobs / library ──────────────────────────────────────────────────────────
   async function getJobs() { return (await (await fetch("/api/jobs")).json()).jobs; }
@@ -208,8 +212,10 @@
     catch (e) { setTimeout(() => poll(id), 2000); return; }   // transient blip — keep polling, don't die
     if (s.status === "done") { hideOverlay(); await refreshJobs(id); $("jobSelect").value = id; return loadJob(id); }
     if (s.status === "error") { showOverlay("Processing failed", (s.error || "").split("\n").filter(Boolean).pop() || "unknown error"); return; }
-    showOverlay("Processing", s.stage || "Starting...", s.stage);
-    setTimeout(() => poll(id), 1200);
+    const stage = s.stage || "starting";
+    const hint = (stage === "Separating stems" || stage === "Transcribing notes") ? " · this stage is the slow one" : "";
+    showOverlay("Processing  " + elapsedStr(), stage + " · first run only (cached after)" + hint, stage);
+    setTimeout(() => poll(id), 1000);
   }
 
   // ── Chord diagram (SVG) ─────────────────────────────────────────────────────
