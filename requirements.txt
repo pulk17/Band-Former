@@ -1,0 +1,61 @@
+# ──────────────────────────────────────────────────────────────
+# Band-Former  —  Python Dependencies
+# ──────────────────────────────────────────────────────────────
+# Recommended: Python 3.12 (the audio ML stack lags newer Pythons).
+#
+# Install PyTorch FIRST, matching your GPU. For NVIDIA RTX 50-series
+# (Blackwell, sm_120) you need the CUDA 12.8 build:
+#
+#   pip install torch torchaudio torchvision \
+#       --index-url https://download.pytorch.org/whl/cu128
+#
+# For CPU-only:
+#   pip install torch torchaudio torchvision
+#
+# FFmpeg must be installed on your system for audio decoding.
+# ──────────────────────────────────────────────────────────────
+
+# Core — PyTorch ecosystem (installed separately, see above)
+torch
+torchaudio
+torchvision
+
+# Stage 1 — Source Separation (HTDemucs via audio-separator)
+# Plain (not [gpu]): HTDemucs runs through PyTorch and uses the GPU directly;
+# the onnxruntime-gpu extra is only needed for MDX/VR ONNX models.
+audio-separator
+# audio_separator.separator imports onnxruntime at load time even for the
+# Demucs (torch) path, so the CPU build must be present.
+onnxruntime
+
+# Stage 2 — Beat Tracking
+beat_this
+
+# Stage 3 — Pitch / Note Extraction (YourMT3 via mt3-infer)  ← Phase B upgrade
+# Replaces Spotify Basic Pitch; far better on multi-instrument / full mixes.
+mt3-infer
+# YourMT3's model code imports pytorch_lightning (only in mt3-infer's [full]
+# extra), so install it explicitly.
+pytorch_lightning
+# YourMT3 uses the legacy T5 attention API (tuple past_key_values, no
+# cache_position) and transformers.utils.model_parallel_utils. The Cache
+# refactor in transformers 4.44 and the 5.x removals both break it, so pin
+# to the pre-refactor 4.40.x line.
+transformers==4.40.2
+
+# Utilities
+numpy
+scipy
+librosa
+soundfile
+yt-dlp
+torchcrepe
+
+# Web app (FastAPI backend + Canvas frontend)
+fastapi
+uvicorn[standard]
+python-multipart
+yt-dlp
+
+# Testing
+pytest

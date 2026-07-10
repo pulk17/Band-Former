@@ -1,0 +1,12 @@
+{
+  "name": "tab-engine",
+  "version": "0.1.0",
+  "description": "Band-Former native tab engine: chord + fingering solver.",
+  "dependencies": [
+    "nlohmann-json",
+    {
+      "name": "libsndfile",
+      "default-features": false
+    }
+  ]
+}

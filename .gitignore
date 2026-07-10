@@ -1,0 +1,66 @@
+# ──────────────────────────────────────────────────────────────
+# Band-Former  —  .gitignore
+# ──────────────────────────────────────────────────────────────
+
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+*.egg
+.python-version
+
+# ── Virtual environment ──────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── Model weights (large binary files) ──────────────────────
+pipeline/models/*.th
+pipeline/models/*.ckpt
+
+# YourMT3 checkpoint cache (git-cloned from HF on first run)
+.mt3_checkpoints/
+
+# ── Audio data ───────────────────────────────────────────────
+data/input/
+data/output/
+data/video/
+
+# ── C++ build artifacts ──────────────────────────────────────
+tab_engine/build/
+tab_engine/combinred.txt
+
+# ── vcpkg (dependencies installed per-project in manifest mode) ──
+tab_engine/vcpkg_installed/
+vcpkg_installed/
+vcpkg-manifest-install.log
+
+# ── External libraries (vendored, too large for repo) ────────
+tab_engine/include/nlohmann/
+
+# ── Test files ───────────────────────────────────────────────
+tab_engine/tests/
+test_*.py
+
+# ── Scratch / generated ─────────────────────────────────────
+combine.py
+combined.txt
+*.json
+!requirements.txt
+# Build/config manifests must be tracked despite the blanket *.json ignore:
+!tab_engine/vcpkg.json
+!tab_engine/CMakePresets.json
+!tuning.json
+
+# ── IDE / Editor ─────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS junk ──────────────────────────────────────────────────
+.DS_Store
+Thumbs.db

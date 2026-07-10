@@ -1,0 +1,25 @@
+# Build artifacts
+tab_engine/build/
+tab_engine/vcpkg_installed/
+tab_engine/tests/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Data (mounted at runtime instead)
+data/
+
+# Model weights (downloaded at runtime)
+pipeline/models/*.th
+pipeline/models/*.ckpt
+
+# Git / IDE / OS
+.git/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
