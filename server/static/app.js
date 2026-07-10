@@ -3,33 +3,20 @@
   const stage = $("stage"), sx = stage.getContext("2d");
   const tabStage = $("tabStage"), tx = tabStage.getContext("2d");
   const vocalStage = $("vocalStage"), vc = vocalStage.getContext("2d");
+  const rollStage = $("rollStage"), rx = rollStage.getContext("2d");
+  const wave = $("wave"), wx = wave.getContext("2d");
   const PLAY_ICON = '<svg width="16" height="16" viewBox="0 0 16 16"><path d="M4 3l9 5-9 5z" fill="currentColor"/></svg>';
   const PAUSE_ICON = '<svg width="16" height="16" viewBox="0 0 16 16"><rect x="4" y="3" width="3" height="10" rx="1" fill="currentColor"/><rect x="9" y="3" width="3" height="10" rx="1" fill="currentColor"/></svg>';
 
   // ── Data ──────────────────────────────────────────────────────────────────
-  let tab = null, allNotes = [], melodyNotes = [], harmonyNotes = [], chords = [], rawChords = [], beats = [], duration = 0;
-  let smoothChords = false;
-
-  // Snap chord boundaries to the beat grid and merge sub-2-beat flickers.
-  function applyChordSmoothing() {
-    if (!smoothChords || !rawChords.length) return rawChords;
-    const snap = beats.length ? (x) => beats.reduce((a, b) => Math.abs(b - x) < Math.abs(a - x) ? b : a, beats[0]) : (x) => x;
-    const beatDur = beats.length > 1 ? (beats[beats.length - 1] - beats[0]) / (beats.length - 1) : 0.5;
-    const minDur = beatDur * 2;
-    const out = [];
-    for (const c of rawChords) {
-      const s = snap(c.start), e = snap(c.end);
-      if (e <= s) continue;
-      if (out.length && out[out.length - 1].name === c.name) { out[out.length - 1].end = e; continue; }
-      if (out.length && (e - s) < minDur) { out[out.length - 1].end = e; continue; }   // absorb brief change
-      out.push({ ...c, start: s, end: e });
-    }
-    return out;
-  }
+  // (Chords arrive beat-synchronous from the engine — no client smoothing.)
+  let tab = null, allNotes = [], melodyNotes = [], harmonyNotes = [], chords = [], beats = [], duration = 0;
   let vocals = [], vpitch = [], vlo = 48, vhi = 72;
-  let view = "player", content = "both", capo = 0, recommendedCapo = 0, curJob = null;
+  let roll = [];   // tiles videos: exact piano notes {start,duration,pitch,hand}
+  let view = "overview", content = "both", capo = 0, recommendedCapo = 0, curJob = null;
+  let analysis = {};   // tab.analysis — romans, functions, difficulty, practice…
 
-  // ── Chord voicings (computed live so any capo can be selected) ───────────────
+  // ── Chord voicings (computed live so any capo can be selected) ────────────
   const NOTE_PC = { C: 0, "C#": 1, D: 2, "D#": 3, E: 4, F: 5, "F#": 6, G: 7, "G#": 8, A: 9, "A#": 10, B: 11 };
   const PC_NOTE = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
   const BARRE = { maj: [0,2,2,1,0,0], min: [0,2,2,0,0,0], "5": [0,2,2,-1,-1,-1],
@@ -48,7 +35,8 @@
   };
   function jsVoicing(name, c) {
     if (!name || !name.includes(":")) return null;
-    const [root, qual] = name.split(":");
+    const root = name.split(":")[0];
+    const qual = name.split(":")[1].split("/")[0];   // "G:maj/B" → G major shape
     if (!(root in NOTE_PC) || !(qual in BARRE)) return null;
     const t = ((NOTE_PC[root] - c) % 12 + 12) % 12;
     const o = OPEN[t + "|" + qual];
@@ -58,11 +46,27 @@
              frets: BARRE[qual].map((v) => v < 0 ? -1 : v + base), baseFret: base, open: false };
   }
   const voicingOf = (c) => jsVoicing(c.name, capo);
-  const NAME = (p) => PC_NOTE[((p % 12) + 12) % 12] + (Math.floor(p / 12) - 1);
+  const shortName = (n) => n.replace(":maj", "").replace(":min", "m").replace(":", " ");
 
-  // ── Web Audio ───────────────────────────────────────────────────────────────
+  // With a capo, a note recorded below the capo fret can't be played on its
+  // original string — re-fret the same pitch onto the nearest string that can
+  // (what a real player does), instead of hiding the note.
+  const TUNE = [64, 59, 55, 50, 45, 40];   // open-string MIDI, string 1 (high e) … 6 (low E)
+  function refret(n, c) {
+    if (n.fret >= c) return { s: n.string - 1, f: n.fret };
+    let best = null;
+    for (let s = 0; s < 6; s++) {
+      const f = n.pitch - TUNE[s];
+      if (f < c || f > 22) continue;
+      const d = Math.abs(s - (n.string - 1));
+      if (!best || d < best.d) best = { s, f, d };
+    }
+    return best;   // null → genuinely unplayable at this capo
+  }
+
+  // ── Web Audio ─────────────────────────────────────────────────────────────
   let actx = null, buffer = null, src = null;
-  let playing = false, t0ctx = 0, t0song = 0, paused = 0, rate = 1, seeking = false, dirty = true;
+  let playing = false, t0ctx = 0, t0song = 0, paused = 0, rate = 1, dirty = true;
   let loopA = null, loopB = null, metro = false, metroIdx = 0;
 
   const ctx = () => (actx || (actx = new (window.AudioContext || window.webkitAudioContext)()));
@@ -92,22 +96,21 @@
 
   // ── Overlay ───────────────────────────────────────────────────────────────
   const STEP_ORDER = ["starting", "Separating stems", "Tracking beats", "Transcribing notes", "Building tab", "Arranging", "Extracting vocals"];
-
   let overlayT0 = 0;
-  function showOverlay(msg, sub, stage) {
+  function showOverlay(msg, sub, stg) {
     const ov = $("overlay");
-    if (ov.classList.contains("hidden")) overlayT0 = Date.now();   // started now
+    if (ov.classList.contains("hidden")) overlayT0 = Date.now();
     ov.classList.remove("hidden");
     $("overlayMsg").textContent = msg;
     $("overlaySub").textContent = sub || "";
-    updateSteps(stage);
+    updateSteps(stg);
   }
   function updateSteps(currentStage) {
     const idx = STEP_ORDER.indexOf(currentStage);
     document.querySelectorAll(".pStep").forEach((el) => {
       const stepIdx = STEP_ORDER.indexOf(el.dataset.step);
       el.classList.remove("done", "active");
-      if (idx < 0) return;                 // unknown stage (e.g. reprocess skip) — leave neutral
+      if (idx < 0) return;
       if (stepIdx < idx) el.classList.add("done");
       else if (stepIdx === idx) el.classList.add("active");
     });
@@ -115,14 +118,59 @@
   const hideOverlay = () => { $("overlay").classList.add("hidden"); overlayT0 = 0; };
   const elapsedStr = () => { const e = overlayT0 ? Math.floor((Date.now() - overlayT0) / 1000) : 0; return Math.floor(e / 60) + ":" + String(e % 60).padStart(2, "0"); };
 
-  // ── Jobs / library ──────────────────────────────────────────────────────────
+  // ── Library sidebar ───────────────────────────────────────────────────────
   async function getJobs() { return (await (await fetch("/api/jobs")).json()).jobs; }
-  function fillJobSelect(jobs, sel) {
-    const s = $("jobSelect"); s.innerHTML = "";
-    for (const j of jobs) { const o = document.createElement("option"); o.value = j.id; o.textContent = j.name; s.appendChild(o); }
-    if (sel) s.value = sel;
+
+  function renderSongList(jobs) {
+    const list = $("songList"); list.innerHTML = "";
+    if (!jobs.length) {
+      list.innerHTML = "<p class='muted' style='padding:0 8px;color:var(--muted);font-size:12.5px'>No songs yet — paste a YouTube link or upload a file above.</p>";
+      return;
+    }
+    for (const j of jobs) {
+      const row = document.createElement("div");
+      row.className = "songRow " + j.status + (j.id === curJob ? " active" : "");
+      row.innerHTML = `<span class="songDot"></span><span class="songName" title="${j.name}">${j.name}</span>`;
+      row.onclick = () => { if (j.status === "done") loadJob(j.id); };
+
+      const acts = document.createElement("div"); acts.className = "songActs";
+      const rn = document.createElement("button"); rn.textContent = "✎"; rn.title = "Rename";
+      rn.onclick = async (e) => {
+        e.stopPropagation();
+        const name = prompt("Rename song to:", j.name);
+        if (!name || name.trim() === j.name) return;
+        const r = await fetch(`/api/rename/${j.id}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: name.trim() }) });
+        if (!r.ok) { let d = ""; try { d = (await r.json()).detail; } catch (e2) {} $("status").textContent = "Rename failed: " + (d || r.status); return; }
+        refreshJobs();
+      };
+      const rp = document.createElement("button"); rp.textContent = "⟳"; rp.title = "Reprocess";
+      rp.onclick = (e) => {
+        e.stopPropagation();
+        settingsReprocessJobId = j.id;
+        $("runSettingsBtn").textContent = "Apply & Reprocess";
+        $("settingsModal").classList.remove("hidden");
+      };
+      const del = document.createElement("button"); del.textContent = "✕"; del.title = "Delete"; del.className = "danger";
+      del.onclick = async (e) => {
+        e.stopPropagation();
+        del.disabled = true;
+        try {
+          const r = await fetch(`/api/jobs/${j.id}`, { method: "DELETE" });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(d.detail || ("HTTP " + r.status));
+          if (d.still_exists) throw new Error("files in use — close players and retry");
+          row.remove();
+        } catch (err) {
+          del.disabled = false;
+          $("status").textContent = "Delete failed: " + err.message;
+        }
+      };
+      acts.append(rn, rp, del);
+      row.appendChild(acts);
+      list.appendChild(row);
+    }
   }
-  async function refreshJobs(sel) { const jobs = await getJobs(); fillJobSelect(jobs, sel); return jobs; }
+  async function refreshJobs() { const jobs = await getJobs(); renderSongList(jobs); return jobs; }
 
   async function loadJob(id) {
     pause(); paused = 0; loopA = loopB = null; $("loopBtn").classList.remove("on"); $("loopBtn").textContent = "Loop";
@@ -130,22 +178,29 @@
     const r = await fetch(`/api/result/${id}`);
     if (!r.ok) { $("status").textContent = "Result not ready"; return; }
     tab = await r.json();
+    analysis = tab.analysis || {};
     allNotes = (tab.notes || []).slice().sort((a, b) => a.start - b.start);
     melodyNotes = allNotes.filter((n) => n.voice === "lead" || n.melody);
     harmonyNotes = allNotes.filter((n) => !(n.voice === "lead" || n.melody));
-    rawChords = (tab.chords || []).slice().sort((a, b) => a.start - b.start);
-    chords = applyChordSmoothing();
+    chords = (tab.chords || []).slice().sort((a, b) => a.start - b.start);
     beats = tab.beats || [];
     vocals = (tab.vocals || []).slice().sort((a, b) => a.start - b.start);
     vpitch = tab.vocal_pitch || [];
     if (vocals.length) { const ps = vocals.map((n) => n.pitch); vlo = Math.min(...ps) - 3; vhi = Math.max(...ps) + 3; }
     $("viewSeg").querySelector('[data-view=vocals]').style.display = (vocals.length || vpitch.length) ? "" : "none";
+    roll = (tab.roll || []).slice().sort((a, b) => a.start - b.start);
+    $("viewSeg").querySelector('[data-view=roll]').style.display = roll.length ? "" : "none";
 
     const m = tab.metadata || {};
     const last = allNotes.length ? allNotes[allNotes.length - 1] : null;
     duration = m.duration_sec || (last ? last.start + last.duration : 0);
+    $("songTitle").textContent = id;
+    $("songTitle").title = id;
     $("keyBadge").textContent = "key " + (m.key || "—");
     $("bpmBadge").textContent = (m.bpm ? Number(m.bpm).toFixed(0) : "—") + " bpm";
+    const diff = (analysis.difficulty || {}).overall;
+    $("diffBadge").style.display = diff ? "" : "none";
+    if (diff) $("diffBadge").textContent = "difficulty " + diff + "/5";
     recommendedCapo = m.capo || 0;
     fillCapoSelect();
     capo = recommendedCapo;
@@ -156,10 +211,13 @@
     const ab = await (await fetch(`/api/audio/${id}`)).arrayBuffer();
     buffer = await actx.decodeAudioData(ab);
     duration = Math.max(duration, buffer.duration);
+    computePeaks();
     $("playBtn").disabled = false;
-    buildChordGrid(); buildLearn();
+    buildOverview(); buildChordGrid(); buildLearn();
+    setView("overview");
     $("status").textContent = ""; dirty = true;
-    hideOverlay();                                  // ensure the progress window is gone
+    refreshJobs();
+    hideOverlay();
   }
 
   function fillCapoSelect() {
@@ -184,9 +242,12 @@
     fd.append("run_beats", $("optBeats").checked);
     fd.append("run_vocals", $("optVocals").checked);
     fd.append("vocal_model", $("optVocalModel").value);
+    fd.append("separation_quality", $("optSep").value);
+    fd.append("tiles", $("tilesChk").checked);
     const r = await fetch("/api/transcribe", { method: "POST", body: fd });
     e.target.value = "";
     if (!r.ok) { showOverlay("Upload failed", await r.text()); return; }
+    refreshJobs();
     poll((await r.json()).job_id);
   });
   $("ytBtn").addEventListener("click", async () => {
@@ -198,27 +259,30 @@
         instrument: $("instSel").value,
         run_beats: $("optBeats").checked,
         run_vocals: $("optVocals").checked,
-        vocal_model: $("optVocalModel").value
+        vocal_model: $("optVocalModel").value,
+        separation_quality: $("optSep").value,
+        tiles: $("tilesChk").checked
       }),
     });
     if (!r.ok) { let d = ""; try { d = (await r.json()).detail; } catch (e) {} showOverlay("YouTube failed", d || `HTTP ${r.status}`); return; }
     $("ytInput").value = "";
+    refreshJobs();
     poll((await r.json()).job_id);
   });
 
   async function poll(id) {
     let s;
     try { s = await (await fetch(`/api/status/${id}`)).json(); }
-    catch (e) { setTimeout(() => poll(id), 2000); return; }   // transient blip — keep polling, don't die
-    if (s.status === "done") { hideOverlay(); await refreshJobs(id); $("jobSelect").value = id; return loadJob(id); }
+    catch (e) { setTimeout(() => poll(id), 2000); return; }   // transient blip — keep polling
+    if (s.status === "done") { hideOverlay(); await refreshJobs(); return loadJob(id); }
     if (s.status === "error") { showOverlay("Processing failed", (s.error || "").split("\n").filter(Boolean).pop() || "unknown error"); return; }
-    const stage = s.stage || "starting";
-    const hint = (stage === "Separating stems" || stage === "Transcribing notes") ? " · this stage is the slow one" : "";
-    showOverlay("Processing  " + elapsedStr(), stage + " · first run only (cached after)" + hint, stage);
+    const stg = s.stage || "starting";
+    const hint = (stg === "Separating stems" || stg === "Transcribing notes") ? " · this stage is the slow one" : "";
+    showOverlay("Processing  " + elapsedStr(), stg + " · first run only (cached after)" + hint, stg);
     setTimeout(() => poll(id), 1000);
   }
 
-  // ── Chord diagram (SVG) ─────────────────────────────────────────────────────
+  // ── Chord diagram (SVG) ───────────────────────────────────────────────────
   function chordSVG(v, size = 116) {
     if (!v || !v.frets) return "";
     const frets = v.frets, fretted = frets.filter((f) => f > 0);
@@ -234,101 +298,204 @@
     for (let i = 0; i < ST; i++) {
       const x = padX + i * st, val = frets[i];
       if (val < 0) s += `<text x="${x}" y="${padT - 5}" fill="#e06b6b" font-size="${size * 0.12}" text-anchor="middle">×</text>`;
-      else if (val === 0) s += `<circle cx="${x}" cy="${padT - size * 0.075}" r="${size * 0.045}" fill="none" stroke="#ff6a3d" stroke-width="1.5"/>`;
-      else { const pos = open ? val : (val - startFret + 1); const y = padT + (pos - 0.5) * fy; s += `<circle cx="${x}" cy="${y}" r="${size * 0.072}" fill="#ff6a3d"/>`; }
+      else if (val === 0) s += `<circle cx="${x}" cy="${padT - size * 0.075}" r="${size * 0.045}" fill="none" stroke="#ffffff" stroke-width="1.5"/>`;
+      else { const pos = open ? val : (val - startFret + 1); const y = padT + (pos - 0.5) * fy; s += `<circle cx="${x}" cy="${y}" r="${size * 0.072}" fill="#ffffff"/>`; }
     }
     return s + "</svg>";
   }
 
   function uniqueChords() {
-    const seen = new Map(), count = new Map();
+    const seen = new Map(), count = new Map(), time = new Map();
     for (const c of chords) {
       if (c.name === "silence" || c.name === "unknown") continue;
       count.set(c.name, (count.get(c.name) || 0) + 1);
+      time.set(c.name, (time.get(c.name) || 0) + (c.end - c.start));
       if (!seen.has(c.name)) seen.set(c.name, c);
     }
-    return { list: [...seen.values()], count };
+    return { list: [...seen.values()], count, time };
   }
+
   function buildChordGrid() {
     const g = $("chordGrid"); g.innerHTML = "";
     const { list, count } = uniqueChords();
+    const romans = analysis.romans || {};
     for (const c of list) {
       const v = voicingOf(c);
       const shape = (capo > 0 && v) ? `<div class="play">play ${v.name}</div>` : "";
+      const ro = romans[c.name] ? `<div class="ro">${romans[c.name]}</div>` : "";
       const d = document.createElement("div");
       d.className = "chordCard"; d.dataset.name = c.name;
-      d.innerHTML = `<div class="cn">${c.name}</div>${chordSVG(v, 104)}${shape}<div class="ct">${count.get(c.name)}×</div>`;
+      d.innerHTML = `<div class="cn">${c.name}</div>${ro}${chordSVG(v, 104)}${shape}<div class="ct">${count.get(c.name)}×</div>`;
       d.onclick = () => { const f = chords.find((x) => x.name === c.name); if (f) seekTo(f.start); };
       g.appendChild(d);
     }
   }
 
-  // ── Learn view (music theory derived from the song) ──────────────────────────
-  const MAJ_DEG = [0,2,4,5,7,9,11], MIN_DEG = [0,2,3,5,7,8,10];
-  const MAJ_ROMAN = ["I","ii","iii","IV","V","vi","vii°"], MIN_ROMAN = ["i","ii°","III","iv","v","VI","VII"];
+  // ── Overview ──────────────────────────────────────────────────────────────
+  function buildOverview() {
+    const el = $("overviewBody"); if (!el || !tab) return;
+    const m = tab.metadata || {};
+    const { list, time } = uniqueChords();
+    const romans = analysis.romans || {};
+    const diff = analysis.difficulty || {};
+    const prog = analysis.progression;
+    const sorted = list.slice().sort((a, b) => (time.get(b.name) || 0) - (time.get(a.name) || 0));
+
+    const chordTiles = sorted.slice(0, 8).map((c) => {
+      const v = voicingOf(c);
+      return `<div class="ovChord" data-name="${c.name}">${chordSVG(v, 74)}
+        <div class="nm">${c.name}</div><div class="ro">${romans[c.name] || ""}</div></div>`;
+    }).join("");
+
+    const bars = ["chords", "changes", "riff"].map((k) => {
+      const v = diff[k] || 0;
+      return `<div class="diffBar"><span class="lbl">${k}</span><div class="track"><div class="fill" style="width:${v * 20}%"></div></div><span>${v || "—"}/5</span></div>`;
+    }).join("");
+
+    const progHtml = prog
+      ? `<p class="prog">${prog.chords.map((n, i) => `<span>${shortName(n)}<span class="rn">${prog.romans[i] || ""}</span></span>`).join("<i>→</i>")}</p>
+         <p class="muted">This loop repeats ${prog.count}× — it IS the song.</p>`
+      : "<p class='muted'>No dominant loop found — the chords move freely.</p>";
+
+    el.innerHTML = `
+      <div class="ovGrid">
+        <section class="card">
+          <div class="ovBig">${curJob || ""}</div>
+          <div class="ovStats">
+            <div class="ovStat"><b>${m.key || "—"}</b><span>key</span></div>
+            <div class="ovStat"><b>${m.bpm ? Number(m.bpm).toFixed(0) : "—"}</b><span>bpm</span></div>
+            <div class="ovStat"><b>${recommendedCapo || "0"}</b><span>capo ★</span></div>
+            <div class="ovStat"><b>${list.length}</b><span>chords</span></div>
+            <div class="ovStat"><b>${(tab.melody || []).length}</b><span>lead notes</span></div>
+          </div>
+          <div class="ovCTA">
+            <button class="primary" id="ovPractice">Start guided practice</button>
+            <button id="ovPlay">Open player</button>
+          </div>
+        </section>
+        <section class="card">
+          <h3>Difficulty</h3>
+          ${bars}
+          <p class="muted">${diff.barre_required ? "Includes barre shapes — the capo suggestion removes most of them." : "No barre chords needed at the suggested capo."}</p>
+        </section>
+        <section class="card">
+          <h3>The loop</h3>
+          ${progHtml}
+        </section>
+        <section class="card" style="grid-column: 1 / -1;">
+          <h3>Chord palette — most played first</h3>
+          <div class="ovChords">${chordTiles}</div>
+          <p class="muted">Click a chord to jump to where it first plays.</p>
+        </section>
+      </div>`;
+    el.querySelectorAll(".ovChord").forEach((tile) => {
+      tile.onclick = () => { const f = chords.find((x) => x.name === tile.dataset.name); if (f) { seekTo(f.start); setView("player"); } };
+    });
+    const bp = $("ovPractice"); if (bp) bp.onclick = () => setView("learn");
+    const bo = $("ovPlay"); if (bo) bo.onclick = () => setView("player");
+  }
+
+  // ── Learn view (driven by tab.analysis) ───────────────────────────────────
+  const progressKey = () => "bf_done_" + curJob;
+  const getDone = () => { try { return new Set(JSON.parse(localStorage.getItem(progressKey()) || "[]")); } catch (e) { return new Set(); } };
+  const setDone = (s) => localStorage.setItem(progressKey(), JSON.stringify([...s]));
+
   function buildLearn() {
-    const el = $("learnBody"); if (!el) return;
+    const el = $("learnBody"); if (!el || !tab) return;
     const m = tab.metadata || {};
     const key = m.key || "";
     const [tonicName, mode] = key.split(" ");
     const tonic = NOTE_PC[tonicName]; const major = mode === "major";
-    if (tonic === undefined) { el.innerHTML = "<p class='muted'>Key not detected for this song.</p>"; return; }
-    const degs = major ? MAJ_DEG : MIN_DEG, roman = major ? MAJ_ROMAN : MIN_ROMAN;
-    const scalePcs = degs.map((d) => (tonic + d) % 12);
-    const scaleNames = scalePcs.map((p) => PC_NOTE[p]);
-
+    const romans = analysis.romans || {};
+    const functions = analysis.functions || {};
     const { list, count } = uniqueChords();
     const sorted = list.sort((a, b) => count.get(b.name) - count.get(a.name));
+
+    // chords & roles
     const chordRows = sorted.slice(0, 10).map((c) => {
-      const root = NOTE_PC[c.name.split(":")[0]];
-      const di = scalePcs.indexOf(root);
-      const r = di >= 0 ? roman[di] : "borrowed";
+      const f = functions[c.name] || {};
       const v = jsVoicing(c.name, capo);
-      const play = capo > 0 && v ? ` — play <b>${v.name}</b>` : (v ? ` — <b>${v.name}</b> shape` : "");
-      return `<tr><td><b>${c.name}</b></td><td>${r}</td><td>${count.get(c.name)}×</td><td>${play}</td></tr>`;
+      const play = capo > 0 && v ? `play <b>${v.name}</b>` : (v ? `<b>${v.name}</b> shape` : "");
+      return `<tr><td><b>${c.name}</b></td><td>${romans[c.name] || "?"}</td><td>${count.get(c.name)}×</td><td class="muted">${f.role || ""}</td><td>${play}</td></tr>`;
     }).join("");
 
-    const prog = chords.filter((c) => c.name !== "silence" && c.name !== "unknown");
-    const seq = []; for (const c of prog) { if (!seq.length || seq[seq.length-1] !== c.name) seq.push(c.name); if (seq.length >= 8) break; }
+    // scale
+    let scaleHtml = "<p class='muted'>Key not detected.</p>";
+    if (tonic !== undefined) {
+      const degs = major ? [0,2,4,5,7,9,11] : [0,2,3,5,7,8,10];
+      const names = degs.map((d) => PC_NOTE[(tonic + d) % 12]);
+      scaleHtml = `<p><b>${key} scale:</b> ${names.join(" · ")}</p>
+        <p class="muted">These 7 notes are the "safe" notes to solo or sing over this song.</p>`;
+    }
+    const scales = (analysis.solo_scales || []).map((s) =>
+      `<p><b>${s.name}</b></p><div class="pillRow">${s.positions.map((p) => `<span class="pill">box ${p.box} · fret ${p.fret}</span>`).join("")}</div>
+       <p class="muted">Box 1 at fret ${s.positions[0] ? s.positions[0].fret : "?"} is the classic solo position for this song.</p>`).join("");
 
-    const I = PC_NOTE[tonic], IV = PC_NOTE[(tonic+5)%12], V = PC_NOTE[(tonic+7)%12], vi = PC_NOTE[(tonic+9)%12];
+    // cadences + borrowed
+    const cad = (analysis.cadences || []).slice(0, 6).map((c) =>
+      `<div class="cadRow" data-t="${c.at}"><b>${fmt(c.at)}</b> — ${shortName(c.from)} → ${shortName(c.to)}<br><span class="muted">${c.type}</span></div>`).join("")
+      || "<p class='muted'>No clear cadences detected.</p>";
+    const borrowed = (analysis.borrowed || []).slice(0, 5).map((b) =>
+      `<p><b>${b.chord}</b> (${b.label}) — <span class="muted">${b.why}</span></p>`).join("");
+
+    // transitions
+    const trans = (analysis.transitions || []).slice(0, 5).map((t) =>
+      `<tr><td><b>${shortName(t.from)} → ${shortName(t.to)}</b></td><td>${t.count}×</td><td class="muted">${t.barre ? "barre involved" : "open shapes"}</td></tr>`).join("");
+
+    // practice plan with persistent checkmarks
+    const done = getDone();
+    const plan = (analysis.practice || []).map((p) =>
+      `<div class="planStep ${done.has(p.step) ? "done" : ""}" data-step="${p.step}">
+        <span class="chk">${done.has(p.step) ? "✓" : ""}</span>
+        <div><div class="tt">${p.title}</div><div class="dd">${p.detail}</div></div>
+      </div>`).join("") || "<p class='muted'>Process the song to generate a plan.</p>";
+
     el.innerHTML = `
       <div class="learnGrid">
         <section class="card">
           <h3>This song in a nutshell</h3>
-          <p><b>Key:</b> ${key} &nbsp; <b>Tempo:</b> ${m.bpm ? Number(m.bpm).toFixed(0) : "?"} BPM &nbsp; ${capo>0?`<b>Capo:</b> fret ${capo}`:"<b>No capo</b>"}</p>
-          <p><b>${key} scale:</b> ${scaleNames.join(" · ")}</p>
-          <p class="muted">These 7 notes are your "safe" notes for soloing/melody over this song.</p>
+          <p><b>Key:</b> ${key || "—"} &nbsp; <b>Tempo:</b> ${m.bpm ? Number(m.bpm).toFixed(0) : "?"} BPM &nbsp; ${capo > 0 ? `<b>Capo:</b> fret ${capo}` : "<b>No capo</b>"}</p>
+          ${scaleHtml}
         </section>
         <section class="card">
-          <h3>The chords & their job</h3>
-          <table class="ltab"><tr><th>Chord</th><th>Role</th><th>Uses</th><th></th></tr>${chordRows}</table>
-          <p class="muted">Roman numerals show each chord's function. ${major?`<b>${I}</b> (I) is home, <b>${IV}</b> (IV) and <b>${V}</b> (V) create tension/resolution, <b>${vi}</b> (vi) is the sad one.`:`<b>${I}</b> (i) is home in a minor key.`}</p>
+          <h3>Practice plan</h3>
+          ${plan}
+          <p class="muted">Click a step to mark it done — progress is saved per song.</p>
+        </section>
+        <section class="card" style="grid-column: 1 / -1;">
+          <h3>The chords &amp; their job</h3>
+          <table class="ltab"><tr><th>Chord</th><th>Role</th><th>Uses</th><th>What it does</th><th>Shape</th></tr>${chordRows}</table>
         </section>
         <section class="card">
-          <h3>Progression</h3>
-          <p class="prog">${seq.map((n)=>`<span>${n.replace(":maj","").replace(":min","m").replace(":"," ")}</span>`).join("<i>→</i>")}</p>
-          <p class="muted">The recurring loop the song is built on.</p>
+          <h3>Changes to drill</h3>
+          <table class="ltab"><tr><th>Change</th><th>Count</th><th></th></tr>${trans || "<tr><td class='muted'>—</td></tr>"}</table>
+          <p class="muted">Loop these with the Loop button at 0.5× — transitions, not shapes, are what actually make songs hard.</p>
         </section>
         <section class="card">
-          <h3>Step-by-step practice</h3>
-          <ol class="steps">
-            <li><b>Learn the shapes.</b> Open the <b>Chords</b> tab; ${capo>0?`put a capo on fret ${capo} and `:""}memorize the ${sorted.length} shapes above.</li>
-            <li><b>Changes, slowly.</b> Loop a section (Loop button) at <b>0.5×</b> and switch cleanly between chords on the beat (turn on Metro).</li>
-            <li><b>The riff/lead.</b> Switch <b>Show → Lead</b> and the <b>Tab</b> tab; learn the single-note line.</li>
-            <li><b>Put it together.</b> Play rhythm under the lead, ramp speed 0.5×→0.75×→1×.</li>
-            <li><b>Sing it.</b> The <b>Vocals</b> tab shows the vocal pitch line to match.</li>
-          </ol>
+          <h3>Moments that resolve (cadences)</h3>
+          ${cad}
+          <p class="muted">Click one to hear it — this is where the song "comes home".</p>
         </section>
+        ${borrowed ? `<section class="card"><h3>Borrowed colors</h3>${borrowed}<p class="muted">Chords from outside the key — the spice. Hearing WHY they sound surprising is real ear training.</p></section>` : ""}
         <section class="card">
-          <h3>Theory tip</h3>
-          <p>The <b>I–IV–V</b> of ${key} is <b>${I} – ${IV} – ${V}</b> — the three chords behind a huge share of songs. Master moving between them and you can busk most of this genre.</p>
-          <p class="muted">${major?"Major key = bright/happy.":"Minor key = darker/moody."} The vi/relative chord (${vi}) borrows the same notes.</p>
+          <h3>For soloing</h3>
+          ${scales || "<p class='muted'>—</p>"}
         </section>
       </div>`;
+
+    el.querySelectorAll(".planStep").forEach((st) => {
+      st.onclick = () => {
+        const s = getDone();
+        if (s.has(st.dataset.step)) s.delete(st.dataset.step); else s.add(st.dataset.step);
+        setDone(s); buildLearn();
+      };
+    });
+    el.querySelectorAll(".cadRow").forEach((rw) => {
+      rw.onclick = () => { seekTo(Math.max(0, parseFloat(rw.dataset.t) - 3)); setView("player"); if (!playing) toggle(); };
+    });
   }
 
-  // ── Canvas helpers ───────────────────────────────────────────────────────────
+  // ── Canvas helpers ────────────────────────────────────────────────────────
   const LABELS = ["e", "B", "G", "D", "A", "E"];
   const COLORS = ["#ff6a3d", "#ff9f1c", "#ffd23f", "#4cc97f", "#3aa7ff", "#a06bff"];
   const NOWLINE = "#ffffff", INK = "#11131a";
@@ -351,7 +518,46 @@
   }
   function frameSize(cv, c) { const s = csize.get(cv) || { w: 1, h: 1, dpr: 1 }; c.setTransform(s.dpr, 0, 0, s.dpr, 0, 0); return [s.w, s.h]; }
 
-  // ── Player ───────────────────────────────────────────────────────────────────
+  // ── Waveform transport ────────────────────────────────────────────────────
+  let peaks = null;
+  function computePeaks() {
+    if (!buffer) { peaks = null; return; }
+    const N = 1000, data = buffer.getChannelData(0), step = Math.floor(data.length / N) || 1;
+    peaks = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      let mx = 0;
+      const s0 = i * step, s1 = Math.min(data.length, s0 + step);
+      for (let s = s0; s < s1; s += 16) { const v = Math.abs(data[s]); if (v > mx) mx = v; }
+      peaks[i] = mx;
+    }
+  }
+  function drawWave(t) {
+    const [W, H] = frameSize(wave, wx);
+    wx.clearRect(0, 0, W, H);
+    if (!peaks || !duration) return;
+    const mid = H / 2, px = Math.max(1, W / peaks.length);
+    const playedX = (t / duration) * W;
+    for (let i = 0; i < peaks.length; i++) {
+      const x = i / peaks.length * W;
+      const h = Math.max(1.5, peaks[i] * (H * 0.85));
+      wx.fillStyle = x <= playedX ? "rgba(255,255,255,0.85)" : "rgba(255,255,255,0.22)";
+      wx.fillRect(x, mid - h / 2, px * 0.8, h);
+    }
+    if (loopA != null) { wx.fillStyle = "rgba(255,255,255,0.9)"; wx.fillRect((loopA / duration) * W - 1, 0, 2, H); }
+    if (loopB != null) { wx.fillStyle = "rgba(255,255,255,0.9)"; wx.fillRect((loopB / duration) * W - 1, 0, 2, H);
+      wx.fillStyle = "rgba(255,255,255,0.08)"; wx.fillRect((loopA / duration) * W, 0, ((loopB - loopA) / duration) * W, H); }
+    wx.fillStyle = "#ffffff"; wx.fillRect(playedX - 1, 0, 2, H);
+  }
+  let waveDrag = false;
+  const waveSeek = (e) => {
+    const r = wave.getBoundingClientRect();
+    seekTo(((e.clientX - r.left) / r.width) * duration);
+  };
+  wave.addEventListener("pointerdown", (e) => { if (!duration) return; waveDrag = true; wave.setPointerCapture(e.pointerId); waveSeek(e); });
+  wave.addEventListener("pointermove", (e) => { if (waveDrag) waveSeek(e); });
+  wave.addEventListener("pointerup", () => { waveDrag = false; });
+
+  // ── Player ────────────────────────────────────────────────────────────────
   function drawPlayer(t) {
     const [W, H] = frameSize(stage, sx);
     sx.clearRect(0, 0, W, H);
@@ -367,9 +573,9 @@
       if (c.end < tStart || c.start > tEnd) continue;
       const x1 = nowX + (c.start - t) * PPS, x2 = nowX + (c.end - t) * PPS;
       const active = c.start <= t && t < c.end;
-      sx.fillStyle = active ? "rgba(255,106,61,0.20)" : "rgba(255,255,255,0.035)";
+      sx.fillStyle = active ? "rgba(255,255,255,0.16)" : "rgba(255,255,255,0.035)";
       sx.fillRect(x1, 0, Math.max(2, x2 - x1), ribbon);
-      sx.fillStyle = active ? "#ff8a63" : "#8f99ab";
+      sx.fillStyle = active ? "#ffffff" : "#8f99ab";
       if (x2 - x1 > 26) sx.fillText(c.name, (Math.max(x1, 0) + Math.min(x2, W)) / 2, ribbon / 2);
     }
     sx.strokeStyle = "rgba(255,255,255,0.10)"; sx.beginPath(); sx.moveTo(0, ribbon); sx.lineTo(W, ribbon); sx.stroke();
@@ -378,24 +584,28 @@
     sx.font = "bold 11px system-ui"; sx.textAlign = "center";
     for (let i = Math.max(0, lower(list, tStart) - 30); i < list.length; i++) {
       const n = list[i]; if (n.start > tEnd) break; if (n.start + n.duration < tStart) continue;
-      const s = n.string - 1; if (s < 0 || s > 5) continue;
+      const rp = capo ? refret(n, capo) : { s: n.string - 1, f: n.fret };
+      if (!rp) continue;
+      const s = rp.s; if (s < 0 || s > 5) continue;
       const x = nowX + (n.start - t) * PPS, w = Math.max(11, n.duration * PPS);
       const y = top + laneH * (s + 0.5), h = laneH * 0.6;
       const active = n.start <= t && t <= n.start + n.duration;
       const mel = n.voice === "lead" || n.melody;
-      const sf = n.fret - capo;                 // capo-relative fret a player frets
+      const sf = rp.f - capo;                   // capo-relative fret a player frets
       sx.globalAlpha = active ? 1 : (mel ? 0.95 : 0.3);
       sx.fillStyle = active ? "#ffffff" : COLORS[s];
       roundRect(sx, x, y - h / 2, w, h, 4); sx.fill();
       sx.globalAlpha = 1;
-      if ((active || mel) && w > 13 && sf >= 0) { sx.fillStyle = INK; sx.fillText(String(sf), x + Math.min(w / 2, 11), y); }
+      if ((active || mel) && w > 13) { sx.fillStyle = INK; sx.fillText(String(sf), x + Math.min(w / 2, 11), y); }
     }
     sx.textAlign = "left";
     sx.strokeStyle = NOWLINE; sx.lineWidth = 2; sx.beginPath(); sx.moveTo(nowX, 0); sx.lineTo(nowX, H); sx.stroke(); sx.lineWidth = 1;
 
-    // chord panel — NOW shape + next 3 distinct chords WITH shapes (capo-aware)
+    // chord panel — NOW shape + role + next 3 distinct chords WITH shapes
     const cur = chordAt(t);
     $("chordName").textContent = cur ? cur.name : "—";
+    const fn = cur && (analysis.functions || {})[cur.name];
+    $("chordRole").textContent = fn ? `${fn.roman || ""} — ${fn.role || ""}` : "";
     const diag = $("chordDiagram");
     const v = cur ? voicingOf(cur) : null;
     const key = (cur ? cur.name : "_") + "|" + capo;
@@ -411,7 +621,7 @@
       up.push(c); if (up.length >= 3) break;
     }
     const nl = $("nextList");
-    const sig = up.map((c) => c.name).join(",") + "|" + capo;   // rebuild only when set/capo changes
+    const sig = up.map((c) => c.name).join(",") + "|" + capo;
     if (nl.dataset.sig !== sig) {
       nl.dataset.sig = sig;
       nl.innerHTML = up.map((c) => {
@@ -420,7 +630,7 @@
         return `<div class="nextItem">${chordSVG(vv, 66)}<div class="ni-meta"><b>${c.name}</b>${shape}<span class="ni-in"></span></div></div>`;
       }).join("");
     }
-    const ins = nl.querySelectorAll(".ni-in");                  // cheap per-frame countdown
+    const ins = nl.querySelectorAll(".ni-in");
     up.forEach((c, i) => { if (ins[i]) ins[i].textContent = "in " + Math.max(0, c.start - t).toFixed(1) + "s"; });
   }
 
@@ -439,8 +649,10 @@
     tx.font = "bold 16px ui-monospace, monospace"; tx.textAlign = "center";
     for (let i = Math.max(0, lower(melodyNotes, tStart) - 6); i < melodyNotes.length; i++) {
       const n = melodyNotes[i]; if (n.start > tEnd) break; if (n.start < tStart - 1) continue;
-      const s = n.string - 1; if (s < 0 || s > 5) continue;
-      const sf = n.fret - capo; if (sf < 0) continue;
+      const rp = capo ? refret(n, capo) : { s: n.string - 1, f: n.fret };
+      if (!rp) continue;
+      const s = rp.s; if (s < 0 || s > 5) continue;
+      const sf = rp.f - capo;
       const x = nowX + (n.start - t) * PPS, y = pad + laneH * (s + 0.5);
       const active = n.start <= t && t <= n.start + n.duration;
       tx.fillStyle = active ? "#ffffff" : COLORS[s];
@@ -460,32 +672,30 @@
     const nowX = Math.round(W * NOW), padT = 16, padB = 16;
     const tStart = t - nowX / PPS, tEnd = t + (W - nowX) / PPS;
 
-    // Dynamic vertical range — follow the vocal pitch around "now" (zoom to region)
     let lo = 1e9, hi = -1e9;
     for (const n of vocals) { if (n.start > t + 3 || n.start + n.duration < t - 1) continue; lo = Math.min(lo, n.pitch); hi = Math.max(hi, n.pitch); }
     for (const p of vpitch) { if (p[1] == null || p[0] > t + 3 || p[0] < t - 1) continue; lo = Math.min(lo, p[1]); hi = Math.max(hi, p[1]); }
     if (hi >= lo) {
-      const tlo = lo - 3, thi = hi + 3, f = playing ? 0.08 : 1;   // ease while playing, snap when paused
+      const tlo = lo - 3, thi = hi + 3, f = playing ? 0.08 : 1;
       vlo += (tlo - vlo) * f; vhi += (thi - vhi) * f;
     }
     const span = Math.max(4, vhi - vlo);
     const yOf = (p) => padT + (H - padT - padB) * (1 - (p - vlo) / span);
     const noteH = Math.min(22, Math.max(7, (H - padT - padB) / span * 0.85));
-    const stepPx = yOf(vlo) - yOf(vlo + 1);            // px per semitone
+    const stepPx = yOf(vlo) - yOf(vlo + 1);
 
     vc.font = "10px system-ui"; vc.textBaseline = "middle";
     for (let p = Math.ceil(vlo); p <= vhi; p++) {
       const y = yOf(p), isC = (((p % 12) + 12) % 12) === 0;
       vc.strokeStyle = isC ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.05)";
       vc.beginPath(); vc.moveTo(0, y); vc.lineTo(W, y); vc.stroke();
-      if (stepPx >= 11 || isC) {                       // label every note if room, else just C
+      if (stepPx >= 11 || isC) {
         vc.fillStyle = isC ? "#bbb" : "#666"; vc.textAlign = "left";
         vc.fillText(PC_NOTE[(((p % 12) + 12) % 12)] + (Math.floor(p / 12) - 1), 6, y);
       }
     }
     if (beats.length) { vc.strokeStyle = "rgba(255,255,255,0.04)"; for (const b of beats) { const x = nowX + (b - t) * PPS; if (x < 0 || x > W) continue; vc.beginPath(); vc.moveTo(x, padT); vc.lineTo(x, H - padB); vc.stroke(); } }
 
-    // quantized note bars (the "blocks")
     vc.font = "bold 10px system-ui"; vc.textAlign = "center";
     let curName = null;
     for (let i = Math.max(0, lower(vocals, tStart) - 10); i < vocals.length; i++) {
@@ -498,7 +708,6 @@
       if (w > 22 && noteH >= 11) { vc.fillStyle = INK; vc.fillText(n.name, x + Math.min(w / 2, 16), y); }
     }
 
-    // continuous pitch line (vibrato / slides — the actual voice)
     if (vpitch.length) {
       vc.strokeStyle = "#ffffff"; vc.lineWidth = 2; vc.beginPath();
       let pen = false;
@@ -516,6 +725,46 @@
     if (curName) { vc.fillStyle = "#ff9f1c"; vc.font = "bold 22px system-ui"; vc.textAlign = "left"; vc.fillText(curName, nowX + 10, padT + 16); }
   }
 
+  // ── Piano roll (tiles videos — exact notes, hand-colored) ─────────────────
+  function drawRoll(t) {
+    const [W, H] = frameSize(rollStage, rx);
+    rx.clearRect(0, 0, W, H);
+    if (!roll.length) return;
+    const nowX = Math.round(W * NOW), padT = 14, padB = 14;
+    const tStart = t - nowX / PPS, tEnd = t + (W - nowX) / PPS;
+    let lo = 127, hi = 0;
+    for (const n of roll) { lo = Math.min(lo, n.pitch); hi = Math.max(hi, n.pitch); }
+    lo -= 2; hi += 2;
+    const span = Math.max(12, hi - lo);
+    const yOf = (p) => padT + (H - padT - padB) * (1 - (p - lo) / span);
+    const nh = Math.max(3, Math.min(14, (H - padT - padB) / span * 0.8));
+
+    rx.font = "10px system-ui"; rx.textBaseline = "middle";
+    for (let p = Math.ceil(lo); p <= hi; p++) {
+      const isC = ((p % 12) + 12) % 12 === 0;
+      const black = [1, 3, 6, 8, 10].includes(((p % 12) + 12) % 12);
+      const y = yOf(p);
+      if (black) { rx.fillStyle = "rgba(255,255,255,0.025)"; rx.fillRect(0, y - nh / 2, W, nh); }
+      if (isC) {
+        rx.strokeStyle = "rgba(255,255,255,0.12)"; rx.beginPath(); rx.moveTo(0, y + nh / 2); rx.lineTo(W, y + nh / 2); rx.stroke();
+        rx.fillStyle = "#888"; rx.textAlign = "left"; rx.fillText("C" + (Math.floor(p / 12) - 1), 5, y);
+      }
+    }
+    if (beats.length) { rx.strokeStyle = "rgba(255,255,255,0.05)"; for (const b of beats) { const x = nowX + (b - t) * PPS; if (x < 0 || x > W) continue; rx.beginPath(); rx.moveTo(x, padT); rx.lineTo(x, H - padB); rx.stroke(); } }
+
+    for (let i = Math.max(0, lower(roll, tStart) - 20); i < roll.length; i++) {
+      const n = roll[i]; if (n.start > tEnd) break; if (n.start + n.duration < tStart) continue;
+      const x = nowX + (n.start - t) * PPS, w = Math.max(6, n.duration * PPS), y = yOf(n.pitch);
+      const active = n.start <= t && t <= n.start + n.duration;
+      rx.fillStyle = active ? "#ffffff"
+        : n.hand === "left" ? "rgba(58,167,255,0.85)"
+        : n.hand === "right" ? "rgba(76,201,127,0.85)"
+        : "rgba(255,159,28,0.8)";
+      roundRect(rx, x, y - nh / 2, w, nh, 3); rx.fill();
+    }
+    rx.strokeStyle = NOWLINE; rx.lineWidth = 2; rx.beginPath(); rx.moveTo(nowX, padT); rx.lineTo(nowX, H - padB); rx.stroke(); rx.lineWidth = 1;
+  }
+
   let lastName = "";
   function updateGrid(t) {
     const cur = chordAt(t), name = cur ? cur.name : "";
@@ -523,7 +772,7 @@
     for (const card of $("chordGrid").children) card.classList.toggle("active", card.dataset.name === name);
   }
 
-  // ── Loop ──────────────────────────────────────────────────────────────────
+  // ── Frame loop ────────────────────────────────────────────────────────────
   function frame() {
     requestAnimationFrame(frame);
     if (!tab) return;
@@ -537,26 +786,24 @@
     if (!playing && !dirty) return;
     dirty = false;
     if (view === "player") drawPlayer(t);
+    else if (view === "roll") drawRoll(t);
     else if (view === "tab") drawTab(t);
     else if (view === "vocals") drawVocals(t);
     else if (view === "chords") updateGrid(t);
-    if (!seeking) $("seek").value = duration ? Math.round(t / duration * 1000) : 0;
+    drawWave(t);
     $("time").textContent = fmt(t) + " / " + fmt(duration);
   }
 
-  // ── Wire-up ──────────────────────────────────────────────────────────────────
+  // ── Wire-up ───────────────────────────────────────────────────────────────
   $("playBtn").onclick = toggle;
-  $("seek").addEventListener("input", () => { seeking = true; const tt = $("seek").value / 1000 * duration; $("time").textContent = fmt(tt) + " / " + fmt(duration); if (!playing) paused = tt; dirty = true; });
-  $("seek").addEventListener("change", () => { seeking = false; seekTo($("seek").value / 1000 * duration); });
   window.addEventListener("resize", () => { dirty = true; });
-  $("jobSelect").onchange = (e) => loadJob(e.target.value);
   $("speedSel").onchange = (e) => { rate = parseFloat(e.target.value); if (playing) play(songTime()); };
-  $("capoSel").onchange = (e) => { capo = parseInt(e.target.value, 10) || 0; updateCapoBadge(); buildChordGrid(); buildLearn(); dirty = true; };
+  $("capoSel").onchange = (e) => { capo = parseInt(e.target.value, 10) || 0; updateCapoBadge(); buildChordGrid(); buildLearn(); buildOverview(); dirty = true; };
 
   function setView(v) {
     view = v;
     for (const b of $("viewSeg").children) b.classList.toggle("active", b.dataset.view === v);
-    for (const id of ["player", "chords", "tab", "vocals", "learn"]) $(id + "View").classList.toggle("hidden", id !== v);
+    for (const id of ["overview", "player", "roll", "chords", "tab", "vocals", "learn"]) $(id + "View").classList.toggle("hidden", id !== v);
     lastName = ""; dirty = true;
   }
   $("viewSeg").onclick = (e) => { if (e.target.dataset.view) setView(e.target.dataset.view); };
@@ -567,61 +814,9 @@
     if (loopA == null) { loopA = songTime(); btn.textContent = "Set B"; btn.classList.add("on"); }
     else if (loopB == null) { loopB = songTime(); if (loopB < loopA) [loopA, loopB] = [loopB, loopA]; btn.textContent = `Loop ${fmt(loopA)}–${fmt(loopB)}`; }
     else { loopA = loopB = null; btn.textContent = "Loop"; btn.classList.remove("on"); }
+    dirty = true;
   };
   $("metroBtn").onclick = () => { metro = !metro; $("metroBtn").classList.toggle("on", metro); };
-  $("smoothBtn").onclick = () => {
-    smoothChords = !smoothChords;
-    $("smoothBtn").classList.toggle("on", smoothChords);
-    chords = applyChordSmoothing();
-    buildChordGrid(); buildLearn(); dirty = true;
-  };
-
-  // library modal
-  async function openLibrary() {
-    const jobs = await getJobs();
-    const list = $("libraryList"); list.innerHTML = "";
-    if (!jobs.length) list.innerHTML = "<p class='muted'>No songs yet. Add one with a YouTube link or upload.</p>";
-    for (const j of jobs) {
-      const row = document.createElement("div"); row.className = "libRow";
-      row.innerHTML = `<div class="libName"><span class="nm" title="${j.name}">${j.name}</span><span class="libStat">${j.status}</span></div>`;
-      const load = document.createElement("button"); load.textContent = "Open"; load.onclick = () => { $("libraryModal").classList.add("hidden"); $("jobSelect").value = j.id; loadJob(j.id); };
-      const rename = document.createElement("button"); rename.textContent = "Rename";
-      rename.onclick = async () => {
-        const name = prompt("Rename song to:", j.name);
-        if (!name || name.trim() === j.name) return;
-        const r = await fetch(`/api/rename/${j.id}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: name.trim() }) });
-        if (!r.ok) { let d = ""; try { d = (await r.json()).detail; } catch (e) {} alert("Rename failed: " + (d || r.status)); return; }
-        await refreshJobs(); openLibrary();
-      };
-      const reprocess = document.createElement("button"); reprocess.textContent = "Reprocess";
-      reprocess.onclick = () => {
-        $("libraryModal").classList.add("hidden");
-        settingsReprocessJobId = j.id;
-        $("runSettingsBtn").textContent = "Apply & Run";
-        $("settingsModal").classList.remove("hidden");
-      };
-      const del = document.createElement("button"); del.className = "danger"; del.textContent = "Delete";
-      del.onclick = async () => {
-        del.disabled = true; del.textContent = "…";
-        try {
-          const r = await fetch(`/api/jobs/${j.id}`, { method: "DELETE" });
-          const d = await r.json().catch(() => ({}));
-          if (!r.ok) throw new Error(d.detail || ("HTTP " + r.status));
-          if (d.still_exists) throw new Error("files in use — close players and retry");
-          row.remove();
-          await refreshJobs();
-        } catch (e) {
-          del.disabled = false; del.textContent = "Delete";
-          $("overlayMsg").textContent = ""; $("status").textContent = "Delete failed: " + e.message;
-        }
-      };
-      row.append(load, rename, reprocess, del); list.appendChild(row);
-    }
-    $("libraryModal").classList.remove("hidden");
-  }
-  $("libraryBtn").onclick = openLibrary;
-  $("libClose").onclick = () => $("libraryModal").classList.add("hidden");
-  $("libraryModal").onclick = (e) => { if (e.target.id === "libraryModal") $("libraryModal").classList.add("hidden"); };
 
   // settings modal
   let settingsReprocessJobId = null;
@@ -643,7 +838,8 @@
         body: JSON.stringify({
           run_beats: $("optBeats").checked,
           run_vocals: $("optVocals").checked,
-          vocal_model: $("optVocalModel").value
+          vocal_model: $("optVocalModel").value,
+          instrument: $("instSel").value   // switch stem on reprocess (e.g. guitar → all)
         })
       });
       if (!r.ok) {
@@ -655,18 +851,18 @@
   };
 
   document.addEventListener("keydown", (e) => {
-    if (e.target.tagName === "INPUT") return;
+    if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
     if (e.code === "Space") { e.preventDefault(); toggle(); }
     else if (e.code === "ArrowRight") seekTo(songTime() + 5);
     else if (e.code === "ArrowLeft") seekTo(songTime() - 5);
   });
 
   async function init() {
-    watchCanvas(stage); watchCanvas(tabStage); watchCanvas(vocalStage);
+    watchCanvas(stage); watchCanvas(tabStage); watchCanvas(vocalStage); watchCanvas(rollStage); watchCanvas(wave);
     requestAnimationFrame(frame);
     const jobs = await refreshJobs();
     const done = jobs.find((j) => j.status === "done");
-    if (done) { $("jobSelect").value = done.id; await loadJob(done.id); }
+    if (done) await loadJob(done.id);
     else $("status").textContent = "Add a song — paste a YouTube link or upload a file.";
   }
   init();

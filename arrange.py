@@ -55,16 +55,25 @@ OPEN_SHAPES = {
     (9, "5"): ("A5", [-1, 0, 2, 2, -1, -1]),
 }
 
-GHOST_DUR = 0.07        # drop notes shorter than this from the displayed set
-MELODY_MIN_DUR = 0.10   # melody candidates must be at least this long
-MIN_CHORD_DUR = 0.45    # merge chord segments shorter than this
-LEAD_MAX_POLY = 2       # onset slots with <= this many notes feed the lead voice
+try:
+    from tuning import knob as _knob
+except Exception:  # noqa: BLE001
+    def _knob(_s, _k, d):
+        return d
+
+GHOST_DUR = _knob("arrange", "ghost_dur", 0.07)             # drop notes shorter than this
+MELODY_MIN_DUR = _knob("arrange", "melody_min_dur", 0.10)   # melody candidates min length
+MIN_CHORD_DUR = _knob("arrange", "min_chord_dur", 0.45)     # merge chord segments shorter
+LEAD_MAX_POLY = _knob("arrange", "lead_max_poly", 2)        # sparse-slot cutoff for lead
+SKYLINE_GAP = _knob("arrange", "skyline_gap_semitones", 5)  # top-of-strum melody separation
+GHOST_MAX_DUR = _knob("arrange", "harmonic_ghost_max_dur", 0.09)  # chord-clash ghost filter
 
 
 def _parse(name: str):
     if ":" not in name:
         return None
     root, qual = name.split(":", 1)
+    qual = qual.split("/", 1)[0]      # "G:maj/B" → shape of plain G major
     if root not in NOTE_PC or qual not in SHAPES:
         return None
     return NOTE_PC[root], qual
@@ -95,11 +104,11 @@ def pick_capo(chords) -> int:
     easy at any fret, so they shouldn't sway the capo. A mild per-fret penalty
     breaks near-ties toward a lower, more comfortable capo position.
     """
-    counts = defaultdict(int)
+    counts = defaultdict(float)
     for c in chords:
         p = _parse(c["name"])
         if p and p[1] != "5":
-            counts[p] += 1
+            counts[p] += max(0.0, c.get("end", 0) - c.get("start", 0))  # weight by playing time
     if not counts:
         return 0
     best_capo, best_score = 0, -1e9
@@ -238,16 +247,57 @@ def clean_monophonic(notes, min_dur=0.10):
     return out
 
 
+def _chord_pcs(name: str) -> set | None:
+    """Pitch classes of a chord label, or None if unparseable."""
+    IV = {"maj": (0, 4, 7), "min": (0, 3, 7), "5": (0, 7), "7": (0, 4, 7, 10),
+          "maj7": (0, 4, 7, 11), "min7": (0, 3, 7, 10), "sus2": (0, 2, 7),
+          "sus4": (0, 5, 7), "dim": (0, 3, 6), "aug": (0, 4, 8), "6": (0, 4, 7, 9),
+          "m7b5": (0, 3, 6, 10), "add9": (0, 2, 4, 7)}
+    if ":" not in name:
+        return None
+    root, qual = name.split(":", 1)
+    qual = qual.split("/")[0]
+    if root not in NOTE_PC or qual not in IV:
+        return None
+    return {(NOTE_PC[root] + iv) % 12 for iv in IV[qual]}
+
+
+def drop_harmonic_ghosts(notes, chords):
+    """Drop very short notes that clash with the sounding chord — typical MT3
+    harmonic ghosts. Conservative: only sub-90 ms notes are candidates, real
+    passing tones are longer."""
+    if not chords:
+        return notes
+    spans = [(c["start"], c["end"], _chord_pcs(c["name"])) for c in chords]
+    out = []
+    for n in notes:
+        if n["duration"] < GHOST_MAX_DUR:
+            pcs = next((p for s, e, p in spans if p and s <= n["start"] < e), None)
+            if pcs is not None and (n["pitch"] % 12) not in pcs:
+                continue
+        out.append(n)
+    return out
+
+
 def arrange(tab: dict) -> dict:
     raw = tab.get("notes", [])
     notes = declutter(raw, GHOST_DUR)          # drop ghosts from the displayed set too
+    notes = drop_harmonic_ghosts(notes, tab.get("chords", []))
 
     # ── Two-voice separation: lead vs rhythm ─────────────────────────────────
-    # A single guitar plays either a single-note line (lead) or strums chords
-    # (rhythm), rarely both at once — so split by local polyphony. Notes in
-    # sparse onset slots feed the lead line; dense strum slots are rhythm.
+    # Sparse onset slots feed the lead line (single-note playing). Dense strum
+    # slots are rhythm — EXCEPT a clearly separated top note (5+ semitones
+    # above the rest of the strum), which is a melody note played over chords.
     slots = _onset_slots(notes) if notes else []
-    lead_pool = [n for s in slots if len(s) <= LEAD_MAX_POLY for n in s]
+    lead_pool = []
+    for s in slots:
+        if len(s) <= LEAD_MAX_POLY:
+            lead_pool.extend(s)
+        else:
+            top = max(s, key=lambda n: n["pitch"])
+            second = sorted((n["pitch"] for n in s), reverse=True)[1]
+            if top["pitch"] - second >= SKYLINE_GAP:
+                lead_pool.append(top)
     melody = extract_melody(lead_pool)
     melody_keys = {(round(n["start"], 3), n["pitch"]) for n in melody}
     for n in notes:

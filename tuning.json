@@ -1,0 +1,42 @@
+{
+  "_readme": "Every knob the pipeline exposes. Edit, save, hit Reprocess on a song, compare. Delete a key (or this file) to fall back to the default. Sections: chroma/chord = C++ engine (reads this file itself at startup of each run), arrange/vocals = python stages. See PIANO_TILES_PLAN.md part 4 for what each knob does and which symptom it fixes.",
+
+  "chroma": {
+    "q_mult": 1.8,
+    "lateral_inhibition": 0.30
+  },
+
+  "chord": {
+    "silence_threshold": 0.02,
+    "transition_penalty": 0.15,
+    "complexity_penalty": 0.15,
+    "bass_bonus": 0.8,
+    "no_chord_floor": -0.5,
+    "key_penalty": 0.03,
+    "thirdless_penalty": 0.05,
+    "slash_bass_mass": 0.35,
+    "key_window_segs": 16,
+    "gate_tau": 0.09,
+    "miss_weight": 0.6,
+    "absent_weight": 1.5,
+    "absent_tau": 0.08
+  },
+
+  "arrange": {
+    "ghost_dur": 0.07,
+    "melody_min_dur": 0.10,
+    "min_chord_dur": 0.45,
+    "lead_max_poly": 2,
+    "skyline_gap_semitones": 5,
+    "harmonic_ghost_max_dur": 0.09
+  },
+
+  "vocals": {
+    "crepe_model": "full",
+    "periodicity_threshold": 0.21,
+    "split_semitones": 0.6,
+    "hold_seconds": 0.08,
+    "gap_seconds": 0.06,
+    "min_note_seconds": 0.05
+  }
+}

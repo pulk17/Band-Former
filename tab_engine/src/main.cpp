@@ -60,6 +60,20 @@ static std::vector<double> load_beats_json(const std::string& path) {
     return beats;
 }
 
+// User-editable knobs (tuning.json in the working directory — the repo root
+// when launched by the server). Missing file/keys → compiled defaults.
+static json load_tuning() {
+    std::ifstream f("tuning.json");
+    if (!f.is_open()) return json::object();
+    try { json j; f >> j; return j; } catch (...) { return json::object(); }
+}
+template <typename T>
+static void knob(const json& j, const char* section, const char* key, T& out) {
+    if (j.contains(section) && j[section].contains(key)) {
+        try { out = j[section][key].get<T>(); } catch (...) {}
+    }
+}
+
 static std::string parent_dir(const std::string& path) {
     size_t p = path.find_last_of("/\\");
     return (p == std::string::npos) ? std::string(".") : path.substr(0, p);
@@ -221,19 +235,38 @@ int main(int argc, char* argv[]){
     std::vector<int> surviving = run_elimination(timesteps, notes, graph);
 
     if (argc >= 3) {
-        const std::string wav_path = argv[2];
+        // argv[2] = the transcribed stem; argv[4] (optional) = the mix chords
+        // should be read from (full instrumental — bass and keys carry the
+        // harmony a guitar stem alone doesn't).
+        const std::string wav_path   = argv[2];
+        const std::string chord_wav  = (argc >= 5) ? argv[4] : wav_path;
 
-        std::cout << "\nRunning chroma analysis...\n";
-        ChromaResult chroma = compute_chroma(wav_path);
+        json tune = load_tuning();
+        double q_mult = 1.8, inhibition = 0.30;
+        knob(tune, "chroma", "q_mult", q_mult);
+        knob(tune, "chroma", "lateral_inhibition", inhibition);
+
+        std::cout << "\nRunning chroma analysis on: " << chord_wav << "\n";
+        ChromaResult chroma = compute_chroma(chord_wav, 4096, 2048, q_mult, inhibition);
 
         std::cout << "\nRunning chord classification...\n";
         ClassifierConfig cfg;
-        cfg.silence_threshold = 0.02;   // gate at 2% of peak RMS
-        // Chord stability is handled by the Viterbi transition penalty
-        // (cfg.transition_penalty); see ClassifierConfig for tuning knobs.
+        knob(tune, "chord", "silence_threshold",  cfg.silence_threshold);
+        knob(tune, "chord", "transition_penalty", cfg.transition_penalty);
+        knob(tune, "chord", "complexity_penalty", cfg.complexity_penalty);
+        knob(tune, "chord", "bass_bonus",         cfg.bass_bonus);
+        knob(tune, "chord", "no_chord_floor",     cfg.no_chord_floor);
+        knob(tune, "chord", "key_penalty",        cfg.key_penalty);
+        knob(tune, "chord", "thirdless_penalty",  cfg.thirdless_penalty);
+        knob(tune, "chord", "slash_bass_mass",    cfg.slash_bass_mass);
+        knob(tune, "chord", "key_window_segs",    cfg.key_window_segs);
+        knob(tune, "chord", "gate_tau",           cfg.gate_tau);
+        knob(tune, "chord", "miss_weight",        cfg.miss_weight);
+        knob(tune, "chord", "absent_weight",      cfg.absent_weight);
+        knob(tune, "chord", "absent_tau",         cfg.absent_tau);
 
         std::string detected_key;
-        std::vector<ChordLabel> labels = classify_chords(chroma, notes, surviving, cfg, &detected_key);
+        std::vector<ChordLabel> labels = classify_chords(chroma, notes, surviving, beats, cfg, &detected_key);
         // Guard against an empty analysis (audio shorter than the FFT window or
         // unreadable) — chroma.frames.back() would be undefined behavior.
         double total_duration = chroma.frames.empty()
@@ -276,7 +309,7 @@ int main(int argc, char* argv[]){
                        beats, bpm, total_duration);
     } else {
         std::cout << "\n[chroma] No WAV path provided.\n";
-        std::cout << "Usage: tab_engine <notes.json> <guitar_stem.wav>\n";
+        std::cout << "Usage: tab_engine <notes.json> <stem.wav> [beats.json] [chord_mix.wav]\n";
     }
 
     // ── Print first 20 surviving notes ───────────────────────────────────────

@@ -26,6 +26,7 @@ pipeline/models/*.ckpt
 # ── Audio data ───────────────────────────────────────────────
 data/input/
 data/output/
+data/video/
 
 # ── C++ build artifacts ──────────────────────────────────────
 tab_engine/build/
@@ -51,6 +52,7 @@ combined.txt
 # Build/config manifests must be tracked despite the blanket *.json ignore:
 !tab_engine/vcpkg.json
 !tab_engine/CMakePresets.json
+!tuning.json
 
 # ── IDE / Editor ─────────────────────────────────────────────
 .vscode/

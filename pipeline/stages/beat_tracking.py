@@ -53,8 +53,10 @@ def extract_beats(audio_path: Path | str) -> BeatResult:
 
     bpm = None
     if len(beats) >= 2:
-        avg_interval = (beats[-1] - beats[0]) / (len(beats) - 1)
-        bpm = round(60.0 / avg_interval, 1)
+        # median interval — one dropped/extra beat can't skew the tempo
+        intervals = sorted(b - a for a, b in zip(beats, beats[1:]) if b > a)
+        if intervals:
+            bpm = round(60.0 / intervals[len(intervals) // 2], 1)
 
     logger.info("Extracted %d beats, %d downbeats.", len(beats), len(downbeats))
     if bpm is not None:

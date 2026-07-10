@@ -11,12 +11,17 @@
 
 using ChromaVec = std::array<double, 12>;
 
+// A chord template with per-tone weights: root and third matter most for the
+// label, the fifth is the least informative (it's in almost everything).
 struct Template {
-    ChromaVec   vec;
+    ChromaVec   vec;        // weight per pitch class (0 = not a chord tone)
+    double      wsum;       // sum of weights (for normalization)
     std::string name;
     int         root;
     bool        is_minor;
-    int         n_tones;   // number of pitch classes in the chord
+    int         n_tones;
+    bool        has_third;      // false for :5 / :sus2 / :sus4
+    std::vector<int> gate_pcs;  // pitch classes that must carry real mass
 };
 
 static const char* NOTE_NAMES[] = {
@@ -24,79 +29,58 @@ static const char* NOTE_NAMES[] = {
 };
 
 static std::vector<Template> build_templates() {
-    std::vector<Template> templates;
-    templates.reserve(96);
-
-    // Interval sets (semitones from root)
-    const int major_iv[] = {0, 4, 7};        // major triad
-    const int minor_iv[] = {0, 3, 7};        // minor triad
-    const int power_iv[] = {0, 7};           // power chord (root + fifth, no third)
-    const int dom7_iv[]  = {0, 4, 7, 10};    // dominant 7th
-    const int maj7_iv[]  = {0, 4, 7, 11};    // major 7th
-    const int min7_iv[]  = {0, 3, 7, 10};    // minor 7th
-    const int sus4_iv[]  = {0, 5, 7};        // sus4
-
+    // {interval, weight} pairs per chord quality. `gate` lists intervals whose
+    // chroma mass must clear a threshold for the template to be usable at all
+    // — the tones that DEFINE the color (a maj7 without an audible 7th is just
+    // a triad, and letting 4-tone templates assemble themselves from harmonic
+    // spill is how every chord turns into somebody's maj7).
+    struct Tone { int iv; double w; };
     struct ChordType {
-        const int*  intervals;
-        int         count;
-        std::string suffix;
-        bool        is_minor;
+        std::vector<Tone> tones;
+        std::vector<int>  gate;
+        const char*       suffix;
+        bool              is_minor;
     };
 
-    ChordType types[] = {
-        {major_iv, 3, ":maj",  false},
-        {minor_iv, 3, ":min",  true },
-        {power_iv, 2, ":5",    false},   // power chord — common in rock/punk
-        {dom7_iv,  4, ":7",    false},
-        {maj7_iv,  4, ":maj7", false},
-        {min7_iv,  4, ":min7", true },
-        {sus4_iv,  3, ":sus4", false},
+    static const std::vector<ChordType> types = {
+        {{{0,1.0},{4,0.9},{7,0.75}},          {},       ":maj",   false},
+        {{{0,1.0},{3,0.9},{7,0.75}},          {},       ":min",   true },
+        {{{0,1.0},{7,0.9}},                   {},       ":5",     false},  // power chord
+        {{{0,1.0},{4,0.9},{7,0.7},{10,0.85}}, {10},     ":7",     false},
+        {{{0,1.0},{4,0.9},{7,0.7},{11,0.85}}, {11},     ":maj7",  false},
+        {{{0,1.0},{3,0.9},{7,0.7},{10,0.85}}, {10},     ":min7",  true },
+        {{{0,1.0},{2,0.85},{7,0.8}},          {2},      ":sus2",  false},
+        {{{0,1.0},{5,0.85},{7,0.8}},          {5},      ":sus4",  false},
+        {{{0,1.0},{3,0.9},{6,0.85}},          {6},      ":dim",   true },
+        {{{0,1.0},{4,0.9},{8,0.85}},          {8},      ":aug",   false},
+        {{{0,1.0},{4,0.85},{7,0.7},{9,0.8}},  {9},      ":6",     false},
+        {{{0,1.0},{3,0.9},{6,0.8},{10,0.8}},  {6,10},   ":m7b5",  true },
+        {{{0,1.0},{2,0.7},{4,0.9},{7,0.7}},   {2},      ":add9",  false},
     };
 
+    std::vector<Template> templates;
+    templates.reserve(12 * types.size());
     for (int root = 0; root < 12; ++root) {
         for (const auto& type : types) {
-            ChromaVec vec;
-            vec.fill(0.0);
-            for (int k = 0; k < type.count; ++k)
-                vec[static_cast<size_t>((root + type.intervals[k]) % 12)] = 1.0;
-
-            double norm = 0.0;
-            for (double v : vec) norm += v * v;
-            norm = std::sqrt(norm);
-            for (double& v : vec) v /= norm;
-
-            templates.push_back(Template{
-                vec,
-                std::string(NOTE_NAMES[root]) + type.suffix,
-                root,
-                type.is_minor,
-                type.count
-            });
+            Template t;
+            t.vec.fill(0.0);
+            t.wsum = 0.0;
+            t.has_third = false;
+            for (const auto& tone : type.tones) {
+                t.vec[static_cast<size_t>((root + tone.iv) % 12)] = tone.w;
+                t.wsum += tone.w;
+                if (tone.iv == 3 || tone.iv == 4) t.has_third = true;
+            }
+            t.name     = std::string(NOTE_NAMES[root]) + type.suffix;
+            t.root     = root;
+            t.is_minor = type.is_minor;
+            t.n_tones  = static_cast<int>(type.tones.size());
+            for (int giv : type.gate)
+                t.gate_pcs.push_back((root + giv) % 12);
+            templates.push_back(std::move(t));
         }
     }
     return templates;
-}
-
-// Per-template fit score for one frame. Rewards present chord tones (weighted by
-// the template), lightly penalizes chord tones that are absent from the frame.
-static double template_score(const ChromaFrame& frame, const Template& tmpl) {
-    double max_chroma = *std::max_element(frame.chroma.begin(), frame.chroma.end());
-    double score   = 0.0;
-    int    present = 0;
-    for (int i = 0; i < 12; ++i) {
-        double t_val = tmpl.vec[i];
-        if (t_val < 0.01) continue;
-        double relative_energy = frame.chroma[static_cast<size_t>(i)] / (max_chroma + 1e-9);
-        if (relative_energy >= 0.15) {
-            score += t_val * frame.chroma[static_cast<size_t>(i)];
-            ++present;
-        } else {
-            score -= 0.03 * t_val;
-        }
-    }
-    int absent = tmpl.n_tones - present;
-    if (absent > 1) score -= 0.04 * (absent - 1);
-    return score;
 }
 
 // Krumhansl-Schmuckler key estimation from a prepared 12-bin pitch profile.
@@ -131,118 +115,241 @@ static std::array<bool, 12> scale_membership(int tonic, bool major) {
     return in;
 }
 
+// One beat-segment of pooled chroma.
+struct Seg {
+    int    f0, f1;                 // frame range [f0, f1)
+    double t0, t1;                 // time range
+    ChromaVec chroma;              // log-compressed, L1-normalized chord chroma
+    ChromaVec bass;                // L1-normalized bass-band chroma
+    int    bass_pc = -1;           // dominant bass pitch class (-1 = none)
+    bool   silent  = true;
+    int    key_tonic = 0;          // local key (filled later)
+    bool   key_major = true;
+};
+
 std::vector<ChordLabel> classify_chords(const ChromaResult& chroma,
                                         const std::vector<NoteEvent>& notes,
                                         const std::vector<int>& surviving,
+                                        const std::vector<double>& beats,
                                         const ClassifierConfig config,
                                         std::string* out_key)
 {
+    (void)notes; (void)surviving;   // bass now comes from the bass-band chroma
     static const std::vector<Template> templates = build_templates();
 
-    const int F   = static_cast<int>(chroma.frames.size());
-    const int T   = static_cast<int>(templates.size());
-    const int SIL = T;            // "no chord / silence" state
-    const int S   = T + 1;        // total states
-
+    const int F = static_cast<int>(chroma.frames.size());
     std::vector<ChordLabel> labels;
     if (F == 0) return labels;
 
-    const double silence_cutoff = config.silence_threshold * chroma.peak_energy;
-    const double frame_window   = static_cast<double>(chroma.frame_size) / chroma.sample_rate;
+    const int T   = static_cast<int>(templates.size());
+    const int SIL = T;
+    const int S   = T + 1;
     constexpr double BIG = 1e9;
 
-    // ── Bass pitch class per frame (lowest surviving note active here) ────────
-    std::vector<int>    bass_pc(static_cast<size_t>(F), -1);
-    std::array<double, 12> bass_hist{};
-    bass_hist.fill(0.0);
-    for (int f = 0; f < F; ++f) {
-        double ft  = chroma.frames[static_cast<size_t>(f)].time_sec;
-        int    lo  = 1000;
-        for (int ni : surviving) {
-            const NoteEvent& n = notes[static_cast<size_t>(ni)];
-            if (n.start_time <= ft + frame_window && n.end_time >= ft && n.pitch < lo)
-                lo = n.pitch;
-        }
-        if (lo != 1000) {
-            bass_pc[static_cast<size_t>(f)] = lo % 12;
-            bass_hist[static_cast<size_t>(lo % 12)] += 1.0;
-        }
+    // ── Percentile-based silence gate (#13) ───────────────────────────────────
+    double gate;
+    {
+        std::vector<double> e;
+        e.reserve(static_cast<size_t>(F));
+        for (const auto& fr : chroma.frames) e.push_back(fr.energy);
+        std::nth_element(e.begin(), e.begin() + static_cast<long>(e.size() * 95 / 100),
+                         e.end());
+        double p95 = e[static_cast<size_t>(e.size() * 95 / 100)];
+        gate = std::max(1e-7, config.silence_threshold * p95);
     }
 
-    // ── Global key estimate → penalize chords with out-of-key tones ──────────
-    // The tonic is almost always the bass root, so blend the (octave-collapsed)
-    // chroma profile with the bass-note histogram. This resolves the classic
-    // K-S confusion between a major key and its mediant minor (e.g. E major vs
-    // G# minor), which share six of seven notes.
-    std::array<double, 12> key_profile{};
-    key_profile.fill(0.0);
-    double chroma_sum = 0.0, bass_sum = 0.0;
-    for (const auto& fr : chroma.frames) {
-        if (fr.energy < silence_cutoff) continue;
-        for (int i = 0; i < 12; ++i) { key_profile[static_cast<size_t>(i)] += fr.chroma[static_cast<size_t>(i)]; chroma_sum += fr.chroma[static_cast<size_t>(i)]; }
+    // ── Build beat-segment boundaries (#9) ────────────────────────────────────
+    const double t_end     = chroma.frames[static_cast<size_t>(F - 1)].time_sec
+                             + static_cast<double>(chroma.frame_size) / chroma.sample_rate;
+
+    std::vector<double> bounds;
+    bounds.push_back(0.0);
+    if (beats.size() >= 2) {
+        for (double b : beats)
+            if (b > bounds.back() + 0.06 && b < t_end) bounds.push_back(b);
+    } else {
+        for (double t = 0.5; t < t_end; t += 0.5) bounds.push_back(t);
     }
-    for (double v : bass_hist) bass_sum += v;
-    if (chroma_sum > 0 && bass_sum > 0) {
-        // Normalize each to unit sum, then add bass with a strong weight.
-        for (int i = 0; i < 12; ++i)
-            key_profile[static_cast<size_t>(i)] =
-                key_profile[static_cast<size_t>(i)] / chroma_sum
-                + 1.5 * bass_hist[static_cast<size_t>(i)] / bass_sum;
+    bounds.push_back(t_end);
+
+    // ── Pool chroma per segment ───────────────────────────────────────────────
+    std::vector<Seg> segs;
+    segs.reserve(bounds.size());
+    int f = 0;
+    for (size_t b = 0; b + 1 < bounds.size(); ++b) {
+        Seg s;
+        s.t0 = bounds[b];
+        s.t1 = bounds[b + 1];
+        s.f0 = f;
+        while (f < F && chroma.frames[static_cast<size_t>(f)].time_sec < s.t1) ++f;
+        s.f1 = f;
+        if (s.f1 <= s.f0) continue;   // no frames in this sliver — skip
+
+        ChromaVec acc{}, bacc{};
+        acc.fill(0.0); bacc.fill(0.0);
+        double wsum = 0.0;
+        for (int i = s.f0; i < s.f1; ++i) {
+            const ChromaFrame& fr = chroma.frames[static_cast<size_t>(i)];
+            if (fr.energy < gate) continue;
+            for (int k = 0; k < 12; ++k) {
+                acc[static_cast<size_t>(k)]  += fr.energy * fr.chroma[static_cast<size_t>(k)];
+                bacc[static_cast<size_t>(k)] += fr.energy * fr.bass_chroma[static_cast<size_t>(k)];
+            }
+            wsum += fr.energy;
+        }
+        if (wsum > 1e-12) {
+            s.silent = false;
+            // L1-normalize the energy-weighted mean chroma. No compression:
+            // the scoring's missing-tone threshold handles moderate tones, and
+            // flattening the profile drowns real chords in off-chord mass.
+            double sum = 0.0;
+            for (int k = 0; k < 12; ++k) sum += acc[static_cast<size_t>(k)];
+            if (sum > 1e-12)
+                for (double& v : acc) v /= sum;
+            s.chroma = acc;
+
+            double bsum = 0.0;
+            for (double v : bacc) bsum += v;
+            if (bsum > 1e-12) {
+                for (double& v : bacc) v /= bsum;
+                s.bass = bacc;
+                int arg = 0;
+                for (int k = 1; k < 12; ++k)
+                    if (bacc[static_cast<size_t>(k)] > bacc[static_cast<size_t>(arg)]) arg = k;
+                if (bacc[static_cast<size_t>(arg)] >= 0.25) s.bass_pc = arg;
+            }
+        }
+        segs.push_back(s);
     }
 
-    int  key_tonic; bool key_major;
-    estimate_key(key_profile, key_tonic, key_major);
-    std::array<bool, 12> in_key = scale_membership(key_tonic, key_major);
-    std::string key_name = std::string(NOTE_NAMES[key_tonic]) + (key_major ? " major" : " minor");
+    const int NS = static_cast<int>(segs.size());
+    if (NS == 0) {
+        for (int i = 0; i < F; ++i)
+            labels.push_back(ChordLabel{chroma.frames[static_cast<size_t>(i)].time_sec,
+                                        "silence", -1, false, 0.0});
+        return labels;
+    }
+
+    // ── Windowed key tracking (#11) ───────────────────────────────────────────
+    const int win  = std::max(4, config.key_window_segs);
+    const int nwin = (NS + win - 1) / win;
+    std::vector<int>  win_tonic(static_cast<size_t>(nwin), 0);
+    std::vector<bool> win_major(static_cast<size_t>(nwin), true);
+
+    std::array<double, 12> global_profile{};
+    global_profile.fill(0.0);
+    for (int w = 0; w < nwin; ++w) {
+        std::array<double, 12> prof{}, bass_hist{};
+        prof.fill(0.0); bass_hist.fill(0.0);
+        double csum = 0.0, bsum = 0.0;
+        for (int i = w * win; i < std::min(NS, (w + 1) * win); ++i) {
+            if (segs[static_cast<size_t>(i)].silent) continue;
+            double dur = segs[static_cast<size_t>(i)].t1 - segs[static_cast<size_t>(i)].t0;
+            for (int k = 0; k < 12; ++k) {
+                prof[static_cast<size_t>(k)] += dur * segs[static_cast<size_t>(i)].chroma[static_cast<size_t>(k)];
+                csum += dur * segs[static_cast<size_t>(i)].chroma[static_cast<size_t>(k)];
+            }
+            if (segs[static_cast<size_t>(i)].bass_pc >= 0) {
+                bass_hist[static_cast<size_t>(segs[static_cast<size_t>(i)].bass_pc)] += dur;
+                bsum += dur;
+            }
+        }
+        // Blend the (octave-collapsed) chroma profile with the bass-note
+        // histogram: the tonic is almost always the bass root. This resolves
+        // the classic K-S confusion between a major key and its mediant minor.
+        std::array<double, 12> blended{};
+        blended.fill(0.0);
+        if (csum > 1e-12)
+            for (int k = 0; k < 12; ++k) {
+                blended[static_cast<size_t>(k)] = prof[static_cast<size_t>(k)] / csum
+                    + (bsum > 1e-12 ? 1.5 * bass_hist[static_cast<size_t>(k)] / bsum : 0.0);
+                global_profile[static_cast<size_t>(k)] += blended[static_cast<size_t>(k)];
+            }
+        int tonic; bool major;
+        estimate_key(blended, tonic, major);
+        win_tonic[static_cast<size_t>(w)] = tonic;
+        win_major[static_cast<size_t>(w)] = major;
+    }
+    for (int i = 0; i < NS; ++i) {
+        int w = std::min(i / win, nwin - 1);
+        segs[static_cast<size_t>(i)].key_tonic = win_tonic[static_cast<size_t>(w)];
+        segs[static_cast<size_t>(i)].key_major = win_major[static_cast<size_t>(w)];
+    }
+
+    int  g_tonic; bool g_major;
+    estimate_key(global_profile, g_tonic, g_major);
+    std::string key_name = std::string(NOTE_NAMES[g_tonic]) + (g_major ? " major" : " minor");
     std::cout << "[chord] Estimated key: " << key_name << "\n";
     if (out_key) *out_key = key_name;
 
-    // Pre-count out-of-key tones for each template.
-    std::vector<int> out_of_key(static_cast<size_t>(T), 0);
-    for (int t = 0; t < T; ++t) {
-        int cnt = 0;
-        for (int i = 0; i < 12; ++i)
-            if (templates[static_cast<size_t>(t)].vec[static_cast<size_t>(i)] > 0.01
-                && !in_key[static_cast<size_t>(i)]) ++cnt;
-        out_of_key[static_cast<size_t>(t)] = cnt;
-    }
+    // ── Emissions per segment ─────────────────────────────────────────────────
+    std::vector<double> emission(static_cast<size_t>(NS) * static_cast<size_t>(S));
+    std::vector<double> fit_score(static_cast<size_t>(NS) * static_cast<size_t>(S), 0.0);
 
-    // ── Emission scores: emission[f*S + s] ────────────────────────────────────
-    std::vector<double> emission(static_cast<size_t>(F) * static_cast<size_t>(S));
-    std::vector<double> raw_score(static_cast<size_t>(F) * static_cast<size_t>(S), 0.0);
-
-    for (int f = 0; f < F; ++f) {
-        const ChromaFrame& frame = chroma.frames[static_cast<size_t>(f)];
-        bool silent = frame.energy < silence_cutoff;
-        size_t base = static_cast<size_t>(f) * static_cast<size_t>(S);
+    for (int i = 0; i < NS; ++i) {
+        const Seg& sg = segs[static_cast<size_t>(i)];
+        size_t base = static_cast<size_t>(i) * static_cast<size_t>(S);
+        std::array<bool, 12> in_key = scale_membership(sg.key_tonic, sg.key_major);
 
         for (int t = 0; t < T; ++t) {
-            if (silent) { emission[base + static_cast<size_t>(t)] = -BIG; continue; }
+            if (sg.silent) { emission[base + static_cast<size_t>(t)] = -BIG; continue; }
+            const Template& tp = templates[static_cast<size_t>(t)];
 
-            double sc = template_score(frame, templates[static_cast<size_t>(t)]);
-            raw_score[base + static_cast<size_t>(t)] = sc;
+            // Characteristic-tone gate: the color tone must actually sound
+            // (above the uniform 1/12 floor, so flat mush can't pass).
+            bool gated_out = false;
+            for (int pc : tp.gate_pcs)
+                if (sg.chroma[static_cast<size_t>(pc)] < config.gate_tau) { gated_out = true; break; }
+            if (gated_out) {
+                emission[base + static_cast<size_t>(t)]  = -BIG;
+                fit_score[base + static_cast<size_t>(t)] = -1.0;
+                continue;
+            }
 
-            double e = sc;
-            if (templates[static_cast<size_t>(t)].n_tones >= 4) e -= config.complexity_penalty;
-            if (templates[static_cast<size_t>(t)].root == bass_pc[static_cast<size_t>(f)])
-                e += config.bass_bonus;
-            e -= config.key_penalty * out_of_key[static_cast<size_t>(t)];
+            // Chordino-style scoring on the L1-normalized chroma:
+            //   + mass on chord tones (weighted)
+            //   − mass OFF the chord (a sounding third kills a :5 label)
+            //   − missing-tone penalty (a chord tone that ISN'T sounding
+            //     kills a maj7 label when no 7th is there)
+            double hit = 0.0, miss = 0.0, absent = 0.0;
+            int    off_key = 0;
+            for (int k = 0; k < 12; ++k) {
+                double w = tp.vec[static_cast<size_t>(k)];
+                double c = sg.chroma[static_cast<size_t>(k)];
+                if (w > 0.0) {
+                    hit += w * c;
+                    absent += w * std::max(0.0, config.absent_tau - c);
+                    if (!in_key[static_cast<size_t>(k)]) ++off_key;
+                } else {
+                    miss += c;
+                }
+            }
+            double fit = hit - config.miss_weight * miss - config.absent_weight * absent;
+            fit_score[base + static_cast<size_t>(t)] = fit;
 
+            double e = fit;
+            e -= config.complexity_penalty * (tp.n_tones - 3);
+            if (!tp.has_third) e -= config.thirdless_penalty;
+            // Continuous bass anchoring: the root must be supported by actual
+            // bass-register mass. This is what pins the root when supersets
+            // (add one stray bin, capture more mass) would otherwise win.
+            e += config.bass_bonus * sg.bass[static_cast<size_t>(tp.root)];
+            e -= config.key_penalty * off_key;
             emission[base + static_cast<size_t>(t)] = e;
         }
-        emission[base + static_cast<size_t>(SIL)] = silent ? BIG : config.no_chord_floor;
+        emission[base + static_cast<size_t>(SIL)] = sg.silent ? BIG : config.no_chord_floor;
     }
 
-    // ── Viterbi (max-sum) with a uniform chord-switch penalty ─────────────────
+    // ── Viterbi over segments ─────────────────────────────────────────────────
     const double lambda = config.transition_penalty;
-    std::vector<double> dp(static_cast<size_t>(F) * static_cast<size_t>(S));
-    std::vector<int>    back(static_cast<size_t>(F) * static_cast<size_t>(S), -1);
+    std::vector<double> dp(static_cast<size_t>(NS) * static_cast<size_t>(S));
+    std::vector<int>    back(static_cast<size_t>(NS) * static_cast<size_t>(S), -1);
 
     for (int s = 0; s < S; ++s) dp[static_cast<size_t>(s)] = emission[static_cast<size_t>(s)];
 
-    for (int f = 1; f < F; ++f) {
-        size_t prev = static_cast<size_t>(f - 1) * static_cast<size_t>(S);
-        size_t cur  = static_cast<size_t>(f)     * static_cast<size_t>(S);
+    for (int i = 1; i < NS; ++i) {
+        size_t prev = static_cast<size_t>(i - 1) * static_cast<size_t>(S);
+        size_t cur  = static_cast<size_t>(i)     * static_cast<size_t>(S);
 
         // Top-2 previous states (so "switch" can avoid penalizing a self-stay).
         int    best_prev = 0;
@@ -260,7 +367,7 @@ std::vector<ChordLabel> classify_chords(const ChromaResult& chroma,
         }
 
         for (int s = 0; s < S; ++s) {
-            double stay = dp[prev + static_cast<size_t>(s)];      // no penalty to remain
+            double stay = dp[prev + static_cast<size_t>(s)];
             double sw_val; int sw_from;
             if (best_prev != s) { sw_val = best_val   - lambda; sw_from = best_prev; }
             else                { sw_val = second_val - lambda; sw_from = second_prev; }
@@ -274,8 +381,7 @@ std::vector<ChordLabel> classify_chords(const ChromaResult& chroma,
         }
     }
 
-    // ── Backtrack ─────────────────────────────────────────────────────────────
-    size_t lastbase = static_cast<size_t>(F - 1) * static_cast<size_t>(S);
+    size_t lastbase = static_cast<size_t>(NS - 1) * static_cast<size_t>(S);
     int    last = 0;
     double lastv = dp[lastbase + 0];
     for (int s = 1; s < S; ++s)
@@ -284,27 +390,58 @@ std::vector<ChordLabel> classify_chords(const ChromaResult& chroma,
             last = s;
         }
 
-    std::vector<int> path(static_cast<size_t>(F));
-    path[static_cast<size_t>(F - 1)] = last;
-    for (int f = F - 1; f > 0; --f)
-        path[static_cast<size_t>(f - 1)] =
-            back[static_cast<size_t>(f) * static_cast<size_t>(S) + static_cast<size_t>(path[static_cast<size_t>(f)])];
+    std::vector<int> path(static_cast<size_t>(NS));
+    path[static_cast<size_t>(NS - 1)] = last;
+    for (int i = NS - 1; i > 0; --i)
+        path[static_cast<size_t>(i - 1)] =
+            back[static_cast<size_t>(i) * static_cast<size_t>(S) + static_cast<size_t>(path[static_cast<size_t>(i)])];
 
-    // ── Build labels ──────────────────────────────────────────────────────────
-    labels.reserve(static_cast<size_t>(F));
-    for (int f = 0; f < F; ++f) {
-        int    s = path[static_cast<size_t>(f)];
-        double t = chroma.frames[static_cast<size_t>(f)].time_sec;
+    // ── Segment → name (with slash bass, #12) + expand to per-frame labels ────
+    struct SegLabel { std::string name; int root; bool is_minor; double conf; };
+    std::vector<SegLabel> seg_labels(static_cast<size_t>(NS));
+
+    for (int i = 0; i < NS; ++i) {
+        const Seg& sg = segs[static_cast<size_t>(i)];
+        int s = path[static_cast<size_t>(i)];
+        size_t base = static_cast<size_t>(i) * static_cast<size_t>(S);
 
         if (s == SIL) {
-            bool silent = chroma.frames[static_cast<size_t>(f)].energy < silence_cutoff;
-            labels.push_back(ChordLabel{t, silent ? "silence" : "unknown", -1, false, 0.0});
-        } else {
-            const Template& tmpl = templates[static_cast<size_t>(s)];
-            double conf = std::clamp(raw_score[static_cast<size_t>(f) * static_cast<size_t>(S)
-                                               + static_cast<size_t>(s)], 0.0, 1.0);
-            labels.push_back(ChordLabel{t, tmpl.name, tmpl.root, tmpl.is_minor, conf});
+            seg_labels[static_cast<size_t>(i)] =
+                {sg.silent ? "silence" : "unknown", -1, false, 0.0};
+            continue;
         }
+        const Template& tp = templates[static_cast<size_t>(s)];
+        std::string name = tp.name;
+
+        // Slash bass: dominant bass note that isn't the root, carrying real
+        // mass. "G:maj/B" reads as G major over B.
+        if (sg.bass_pc >= 0 && sg.bass_pc != tp.root
+            && sg.bass[static_cast<size_t>(sg.bass_pc)] >= config.slash_bass_mass
+            && tp.vec[static_cast<size_t>(sg.bass_pc)] > 0.0
+            && tp.name.find(":5") == std::string::npos) {
+            name += std::string("/") + NOTE_NAMES[sg.bass_pc];
+        }
+
+        // Confidence = margin between the chosen chord's fit and the best
+        // *other-root* fit in this segment (quality-mistakes are cheap; root
+        // mistakes are what the margin should reflect).
+        double best_other = -BIG;
+        for (int t = 0; t < T; ++t)
+            if (templates[static_cast<size_t>(t)].root != tp.root)
+                best_other = std::max(best_other, fit_score[base + static_cast<size_t>(t)]);
+        double conf = std::clamp((fit_score[base + static_cast<size_t>(s)] - best_other) * 2.0
+                                 + 0.5, 0.0, 1.0);
+
+        seg_labels[static_cast<size_t>(i)] = {name, tp.root, tp.is_minor, conf};
+    }
+
+    labels.reserve(static_cast<size_t>(F));
+    int si = 0;
+    for (int i = 0; i < F; ++i) {
+        double t = chroma.frames[static_cast<size_t>(i)].time_sec;
+        while (si + 1 < NS && t >= segs[static_cast<size_t>(si)].t1) ++si;
+        const SegLabel& sl = seg_labels[static_cast<size_t>(si)];
+        labels.push_back(ChordLabel{t, sl.name, sl.root, sl.is_minor, sl.conf});
     }
 
     return labels;

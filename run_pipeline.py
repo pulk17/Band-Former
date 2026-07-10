@@ -73,9 +73,18 @@ def process_audio(audio_path: Path | str, instrument: str = "guitar", on_stage=N
     if reprocess:
         report("Skipping separation")
         print("=" * 60 + "\n  STAGE 1 — Source Separation (SKIPPED)\n" + "=" * 60)
-        guitar_stem_path = next(iter(out_dir.glob("*[Gg]uitar*.wav")), None)
+        # instrument-aware: "all" songs were transcribed from the combined stem,
+        # piano/bass/other songs from their own stem — not the guitar one.
+        want = "combined" if instrument == "all" else instrument
+        if instrument == "all":   # build the combined stem if it doesn't exist yet
+            from pipeline.stages.separation import ensure_chord_mix
+            ensure_chord_mix(out_dir)
+        stems = sorted(out_dir.glob("*.wav"))
+        guitar_stem_path = next((p for p in stems if want in p.name.lower()), None)
         if not guitar_stem_path:
-            raise FileNotFoundError(f"Reprocess failed: no guitar stem found in {out_dir}")
+            guitar_stem_path = next((p for p in stems if "guitar" in p.name.lower()), None)
+        if not guitar_stem_path:
+            raise FileNotFoundError(f"Reprocess failed: no {want} stem found in {out_dir}")
         class _DummyResult: pass
         separation_result = _DummyResult()
         separation_result.guitar_stem_path = guitar_stem_path
@@ -83,7 +92,8 @@ def process_audio(audio_path: Path | str, instrument: str = "guitar", on_stage=N
     else:
         report("Separating stems")
         print("=" * 60 + "\n  STAGE 1 — Source Separation\n" + "=" * 60)
-        separation_result = separate_guitar(audio_path, instrument)
+        separation_result = separate_guitar(audio_path, instrument,
+                                            quality=options.get("separation_quality"))
         out_dir = separation_result.guitar_stem_path.parent
         print(f"\n  ✓ Guitar stem : {separation_result.guitar_stem_path}")
         print(f"  ✓ Elapsed     : {separation_result.duration_seconds:.1f} s\n")
@@ -114,7 +124,7 @@ def process_audio(audio_path: Path | str, instrument: str = "guitar", on_stage=N
     # ── Stage 3: Pitch Extraction (required) ──────────────────────────────────
     notes_path = out_dir / "notes.json"
     notes = []
-    if reprocess and notes_path.exists():
+    if reprocess and notes_path.exists() and not options.get("retranscribe"):
         print("=" * 60 + "\n  STAGE 3 — Pitch Extraction (SKIPPED)\n" + "=" * 60)
         print(f"\n  ✓ Skipping pitch extraction (found {notes_path})\n")
         try:
@@ -124,7 +134,7 @@ def process_audio(audio_path: Path | str, instrument: str = "guitar", on_stage=N
     else:
         report("Transcribing notes")
         print("=" * 60 + "\n  STAGE 3 — Pitch Extraction\n" + "=" * 60)
-        notes = extract_notes(separation_result.guitar_stem_path)
+        notes = extract_notes(separation_result.guitar_stem_path, instrument=instrument)
         print(f"\n  ✓ Notes detected: {len(notes)}\n")
 
         notes_path.write_text(json.dumps(
@@ -151,9 +161,24 @@ def process_audio(audio_path: Path | str, instrument: str = "guitar", on_stage=N
     if tab_engine_bin is None:
         raise RuntimeError("C++ tab engine not built — see README (cmake --build build)")
 
+    # The engine rewrites tab.json from scratch — snapshot vocals so they
+    # survive a run where the vocals stage is skipped or fails.
+    tab_json = out_dir / "tab.json"
+    prev_vocals = {}
+    if tab_json.exists():
+        try:
+            _old = json.loads(tab_json.read_text())
+            prev_vocals = {k: _old[k] for k in ("vocals", "vocal_pitch") if k in _old}
+        except Exception:  # noqa: BLE001
+            pass
+
+    # Chords are classified from the full instrumental mix (bass + keys carry
+    # the harmony), not from the transcribed stem alone.
+    from pipeline.stages.separation import ensure_chord_mix
+    chord_mix = ensure_chord_mix(out_dir) or separation_result.guitar_stem_path
     result = subprocess.run(
         [str(tab_engine_bin), str(notes_path),
-         str(separation_result.guitar_stem_path), str(beats_path)],
+         str(separation_result.guitar_stem_path), str(beats_path), str(chord_mix)],
         capture_output=False, text=True,
     )
     if result.returncode != 0:
@@ -162,11 +187,20 @@ def process_audio(audio_path: Path | str, instrument: str = "guitar", on_stage=N
     # ── Enrich into a playable arrangement + ASCII tab ────────────────────────
     tab_json = out_dir / "tab.json"
     if tab_json.exists():
+        # Record the instrument BEFORE arranging, so a failed arrange doesn't
+        # leave reprocess guessing which stem this song was transcribed from.
+        try:
+            data = json.loads(tab_json.read_text())
+            data.setdefault("metadata", {})["instrument"] = instrument
+            tab_json.write_text(json.dumps(data, indent=2))
+        except Exception:  # noqa: BLE001
+            pass
         report("Arranging")
         try:
             from arrange import arrange
             data = arrange(json.loads(tab_json.read_text()))
-            data.setdefault("metadata", {})["instrument"] = instrument
+            from analyze import build_analysis
+            data["analysis"] = build_analysis(data)
             tab_json.write_text(json.dumps(data, indent=2))
             print(f"  ✓ Arrangement: {data['metadata'].get('num_melody', 0)} "
                   f"melody notes + {len(data.get('chords', []))} chords")
@@ -179,14 +213,31 @@ def process_audio(audio_path: Path | str, instrument: str = "guitar", on_stage=N
         except Exception as exc:  # noqa: BLE001
             print(f"  ⚠ Could not render ASCII tab: {exc}")
 
+        # If this run won't (re)extract vocals, restore the snapshot so the
+        # engine's rewrite doesn't lose them.
+        def restore_vocals(reason: str):
+            if not prev_vocals:
+                return
+            try:
+                d = json.loads(tab_json.read_text())
+                d.update(prev_vocals)
+                tab_json.write_text(json.dumps(d, indent=2))
+                print(f"  ✓ Restored previous vocals ({reason})")
+            except Exception:  # noqa: BLE001
+                pass
+
         # Vocals pitch line — transcribe the isolated Vocals stem.
         if not run_vocals:
+            restore_vocals("vocals stage disabled")
             print("  ✓ Skipping vocals transcription (disabled)")
         else:
             report("Extracting vocals")
             try:
                 from arrange import clean_monophonic
-                vstem = next(iter(out_dir.glob("*[Vv]ocals*.wav")), None)
+                # Prefer the Roformer vocals (two-stage mode) over htdemucs'.
+                vcands = sorted(out_dir.glob("*[Vv]ocals*.wav"),
+                                key=lambda p: 0 if "roformer" in p.name.lower() else 1)
+                vstem = vcands[0] if vcands else None
                 if vstem:
                     vnotes = extract_vocals(vstem, model_choice=vocal_model)
                     vdicts = [{"start": n.start_time, "end": n.end_time, "pitch": n.pitch,
@@ -198,9 +249,95 @@ def process_audio(audio_path: Path | str, instrument: str = "guitar", on_stage=N
                     tab_json.write_text(json.dumps(data, indent=2))
                     print(f"  ✓ Vocals   : {len(data['vocals'])} notes + "
                           f"{sum(1 for p in data['vocal_pitch'] if p[1] is not None)} pitch pts")
+                else:
+                    restore_vocals("no vocals stem found")
+                    print(f"  ⚠ No vocals stem in {out_dir} — vocals skipped. "
+                          f"(Interrupted separation? Reprocess with vocals enabled.)")
             except Exception as exc:  # noqa: BLE001
+                restore_vocals("vocals stage failed")
                 print(f"  ⚠ Vocals transcription failed: {exc}")
 
+    return out_dir
+
+
+def process_tiles_video(audio_path: Path | str, video_path: Path | str,
+                        on_stage=None, options=None) -> Path:
+    """Tiles mode: notes come from the VIDEO (exact), everything else reuses
+    the normal chain — beats + chords from the audio, arrange, analysis."""
+    options = options or {}
+    from pipeline.config import OUTPUT_DIR
+
+    def report(stage: str):
+        if on_stage:
+            on_stage(stage)
+
+    audio_path, video_path = Path(audio_path), Path(video_path)
+    out_dir = OUTPUT_DIR / audio_path.stem
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    report("Reading tiles video")
+    print("=" * 60 + "\n  STAGE 1 — Tiles extraction (video)\n" + "=" * 60)
+    from tiles.extract import extract_notes as tiles_extract, write_outputs, validate_octave
+    result = tiles_extract(video_path, progress=report)
+    try:                       # anchor the absolute octave against the audio
+        shift = validate_octave(result["notes"], audio_path)
+        if shift:
+            for n in result["notes"]:
+                n["pitch"] += shift
+    except Exception as exc:  # noqa: BLE001
+        print(f"  ⚠ Octave validation skipped: {exc}")
+    notes_path = write_outputs(result, out_dir)
+
+    report("Tracking beats")
+    beats_path = out_dir / "beats.json"
+    beat_result = BeatResult()
+    try:
+        beat_result = extract_beats(audio_path)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  ⚠ Beat tracking failed: {exc}")
+    beats_path.write_text(json.dumps(
+        {"beats": beat_result.beats, "downbeats": beat_result.downbeats,
+         "bpm": beat_result.bpm}, indent=2))
+
+    # Engine needs a WAV (chroma). Convert the source audio once.
+    wav = out_dir / f"{audio_path.stem}_audio.wav"
+    if not wav.exists():
+        subprocess.run(["ffmpeg", "-y", "-i", str(audio_path), "-ac", "1",
+                        "-ar", "44100", str(wav)], capture_output=True)
+    if not wav.exists():
+        raise RuntimeError("ffmpeg could not convert audio for chord analysis")
+
+    report("Building tab")
+    tab_engine_bin = find_tab_engine_binary()
+    if tab_engine_bin is None:
+        raise RuntimeError("C++ tab engine not built")
+    r = subprocess.run([str(tab_engine_bin), str(notes_path), str(wav),
+                        str(beats_path), str(wav)], capture_output=False, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"C++ engine failed with code {r.returncode}")
+
+    tab_json = out_dir / "tab.json"
+    if tab_json.exists():
+        report("Arranging")
+        try:
+            from arrange import arrange
+            data = arrange(json.loads(tab_json.read_text()))
+            from analyze import build_analysis
+            data["analysis"] = build_analysis(data)
+            meta = data.setdefault("metadata", {})
+            meta["instrument"] = "tiles"
+            meta["tiles_mode"] = result["mode"]
+            # Raw video notes (with hand colors) for the piano-roll view —
+            # the guitar fret solver drops out-of-range piano notes.
+            data["roll"] = [{"start": n["start_time"],
+                             "duration": round(n["end_time"] - n["start_time"], 4),
+                             "pitch": n["pitch"], "hand": n.get("hand", "")}
+                            for n in result["notes"]]
+            tab_json.write_text(json.dumps(data, indent=2))
+            print(f"  ✓ Tiles arrangement: {len(data.get('notes', []))} notes, "
+                  f"{len(data.get('chords', []))} chords ({result['mode']})")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ⚠ Could not build arrangement: {exc}")
     return out_dir
 
 
