@@ -191,7 +191,11 @@ def process_audio(audio_path: Path | str, instrument: str = "guitar", on_stage=N
         # leave reprocess guessing which stem this song was transcribed from.
         try:
             data = json.loads(tab_json.read_text())
-            data.setdefault("metadata", {})["instrument"] = instrument
+            meta = data.setdefault("metadata", {})
+            meta["instrument"] = instrument
+            warn = getattr(separation_result, "warning", "")
+            if warn:
+                meta["warning"] = warn
             tab_json.write_text(json.dumps(data, indent=2))
         except Exception:  # noqa: BLE001
             pass
@@ -323,16 +327,19 @@ def process_tiles_video(audio_path: Path | str, video_path: Path | str,
         print(f"  ⚠ Octave validation skipped: {exc}")
     notes_path = write_outputs(result, out_dir)
 
-    report("Tracking beats")
     beats_path = out_dir / "beats.json"
-    beat_result = BeatResult()
-    try:
-        beat_result = extract_beats(audio_path)
-    except Exception as exc:  # noqa: BLE001
-        print(f"  ⚠ Beat tracking failed: {exc}")
-    beats_path.write_text(json.dumps(
-        {"beats": beat_result.beats, "downbeats": beat_result.downbeats,
-         "bpm": beat_result.bpm}, indent=2))
+    if options.get("reprocess") and beats_path.exists():
+        print("  ✓ Reusing existing beats (reprocess)")
+    else:
+        report("Tracking beats")
+        beat_result = BeatResult()
+        try:
+            beat_result = extract_beats(audio_path)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ⚠ Beat tracking failed: {exc}")
+        beats_path.write_text(json.dumps(
+            {"beats": beat_result.beats, "downbeats": beat_result.downbeats,
+             "bpm": beat_result.bpm}, indent=2))
 
     # Engine needs a WAV (chroma). Convert the source audio once.
     wav = out_dir / f"{audio_path.stem}_audio.wav"

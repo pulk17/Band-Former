@@ -224,7 +224,8 @@
     $("playBtn").disabled = false;
     buildOverview(); buildChordGrid(); buildLearn();
     setView("overview");
-    $("status").textContent = ""; dirty = true;
+    $("status").textContent = m.warning ? "⚠ " + m.warning : "";
+    dirty = true;
     refreshJobs();
     hideOverlay();
   }
@@ -482,7 +483,8 @@
     const plan = (analysis.practice || []).map((p) =>
       `<div class="planStep ${done.has(p.step) ? "done" : ""}" data-step="${p.step}">
         <span class="chk">${done.has(p.step) ? "✓" : ""}</span>
-        <div><div class="tt">${p.title}</div><div class="dd">${p.detail}</div></div>
+        <div style="flex:1"><div class="tt">${p.title}</div><div class="dd">${p.detail}</div></div>
+        <button class="drillBtn" data-step="${p.step}" title="Set up this drill (loop + speed) and play">▶</button>
       </div>`).join("") || "<p class='muted'>Process the song to generate a plan.</p>";
 
     el.innerHTML = `
@@ -512,6 +514,14 @@
           <p class="muted">Click one to hear it — this is where the song "comes home".</p>
         </section>
         ${borrowed ? `<section class="card"><h3>Borrowed colors</h3>${borrowed}<p class="muted">Chords from outside the key — the spice. Hearing WHY they sound surprising is real ear training.</p></section>` : ""}
+        ${analysis.strumming ? `<section class="card"><h3>Strumming pattern</h3>
+          <p style="font-family:ui-monospace,monospace;font-size:20px;letter-spacing:4px">${analysis.strumming.pattern}</p>
+          <p class="muted">One bar, in eighth notes: D = downstrum on the beat, U = upstrum on the "&", · = let it ring. Confidence ${(analysis.strumming.confidence * 100).toFixed(0)}% — trust your ears over this on syncopated songs.</p>
+        </section>` : ""}
+        ${(analysis.sections || []).length ? `<section class="card"><h3>Song map</h3>
+          <div class="pillRow">${analysis.sections.map((s) => `<span class="pill secPill" data-t="${s.start}">${s.name} · ${fmt(s.start)}</span>`).join("")}</div>
+          <p class="muted">Click a section to jump there. Learn the chorus first — it repeats the most.</p>
+        </section>` : ""}
         <section class="card">
           <h3>For soloing</h3>
           ${scales || "<p class='muted'>—</p>"}
@@ -528,6 +538,65 @@
     el.querySelectorAll(".cadRow").forEach((rw) => {
       rw.onclick = () => { seekTo(Math.max(0, parseFloat(rw.dataset.t) - 3)); setView("player"); if (!playing) toggle(); };
     });
+    el.querySelectorAll(".secPill").forEach((p) => {
+      p.style.cursor = "pointer";
+      p.onclick = () => { seekTo(parseFloat(p.dataset.t)); setView("player"); };
+    });
+    el.querySelectorAll(".drillBtn").forEach((b) => {
+      b.onclick = (e) => { e.stopPropagation(); startDrill(b.dataset.step); };
+    });
+  }
+
+  // ── Guided drills: one click sets loop + speed + view and plays ──────────
+  let riffPhrase = 0;
+  function setLoop(a, b) {
+    loopA = Math.max(0, a); loopB = Math.min(duration, b);
+    const btn = $("loopBtn");
+    btn.classList.add("on"); btn.textContent = `Loop ${fmt(loopA)}–${fmt(loopB)}`;
+  }
+  function clearLoop() {
+    loopA = loopB = null;
+    const btn = $("loopBtn"); btn.classList.remove("on"); btn.textContent = "Loop";
+  }
+  function setSpeed(v) { rate = v; $("speedSel").value = String(v); if (playing) play(songTime()); }
+  function startDrill(step) {
+    if (!buffer) return;
+    if (step === "shapes") { setView("chords"); return; }
+    if (step === "changes") {
+      // loop the first spot where the #1 transition actually happens, ~2 bars wide
+      const t0 = (analysis.transitions || [])[0];
+      if (t0) {
+        for (let i = 0; i < chords.length - 1; i++) {
+          if (chords[i].name === t0.from && chords[i + 1].name === t0.to) {
+            setLoop(chords[i].start - 0.5, chords[i + 1].end + 0.5);
+            break;
+          }
+        }
+      }
+      setSpeed(0.5); setView("player"); play(loopA ?? 0); return;
+    }
+    if (step === "rhythm") {
+      clearLoop(); metro = true; $("metroBtn").classList.add("on");
+      setSpeed(0.75); setView("player"); play(paused); return;
+    }
+    if (step === "riff") {
+      // melody phrases = gaps > 1.5 s; each click advances to the next phrase
+      const mel = (tab.melody || []);
+      if (mel.length) {
+        const phrases = [];
+        let s = mel[0].start, last = mel[0];
+        for (const n of mel.slice(1)) {
+          if (n.start - (last.start + last.duration) > 1.5) { phrases.push([s, last.start + last.duration]); s = n.start; }
+          last = n;
+        }
+        phrases.push([s, last.start + last.duration]);
+        const ph = phrases[riffPhrase % phrases.length]; riffPhrase++;
+        setLoop(ph[0] - 0.3, ph[1] + 0.3);
+        setSpeed(0.5); setView("tab"); play(loopA); return;
+      }
+    }
+    if (step === "sing") { clearLoop(); setSpeed(0.75); setView("vocals"); play(0); return; }
+    clearLoop(); setSpeed(step === "full" ? 0.75 : 1); setView("player"); play(0);   // full run
   }
 
   // ── Canvas helpers ────────────────────────────────────────────────────────
@@ -572,6 +641,16 @@
     if (!peaks || !duration) return;
     const mid = H / 2, px = Math.max(1, W / peaks.length);
     const playedX = (t / duration) * W;
+    // section map: alternating shading + names (choruses slightly brighter)
+    const secs = analysis.sections || [];
+    wx.font = "9px system-ui"; wx.textBaseline = "top";
+    secs.forEach((s, i) => {
+      const x0 = (s.start / duration) * W, x1 = (s.end / duration) * W;
+      wx.fillStyle = s.name === "chorus" ? "rgba(255,255,255,0.10)"
+                   : (i % 2 ? "rgba(255,255,255,0.045)" : "rgba(255,255,255,0.02)");
+      wx.fillRect(x0, 0, x1 - x0, H);
+      if (x1 - x0 > 34) { wx.fillStyle = "rgba(255,255,255,0.5)"; wx.textAlign = "left"; wx.fillText(s.name, x0 + 3, 2); }
+    });
     for (let i = 0; i < peaks.length; i++) {
       const x = i / peaks.length * W;
       const h = Math.max(1.5, peaks[i] * (H * 0.85));

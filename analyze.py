@@ -112,6 +112,103 @@ def _pent_positions(tonic_pc: int, major: bool) -> list[dict]:
              "positions": boxes}]
 
 
+def _detect_sections(chords: list, beats: list) -> list:
+    """Song sections from chord-shingle novelty — no audio analysis needed
+    because the chords are already beat-synchronous.
+
+    A boundary is a beat where the 8 beats before and the 8 beats after carry
+    mostly different chord labels. Segments with the same internal chord loop
+    get the same name; the most-repeated loop is the chorus."""
+    import bisect
+    if len(beats) < 24 or not chords:
+        return []
+    starts = [c["start"] for c in chords]
+
+    def chord_at(t):
+        i = bisect.bisect_right(starts, t) - 1
+        if i >= 0 and chords[i]["start"] <= t < chords[i]["end"]:
+            return chords[i]["name"]
+        return "-"
+
+    labels = [chord_at(b + 1e-3) for b in beats]
+    W = 8
+    # novelty: fraction of mismatched labels across the boundary
+    novelty = [0.0] * len(beats)
+    for i in range(W, len(beats) - W):
+        before, after = labels[i - W:i], labels[i:i + W]
+        novelty[i] = sum(1 for a, b in zip(before, after) if a != b) / W
+    # boundaries: local maxima ≥ 0.5, at least 16 beats apart
+    bounds = [0]
+    for i in range(W, len(beats) - W):
+        if novelty[i] >= 0.5 and novelty[i] == max(novelty[max(0, i - 8):i + 9]):
+            if (i - bounds[-1]) >= 16:
+                bounds.append(i)
+    bounds.append(len(beats) - 1)
+
+    # signature per segment = most common chord 2-gram inside it
+    segs = []
+    for a, b in zip(bounds, bounds[1:]):
+        seq = [x for x in labels[a:b] if x != "-"]
+        grams = Counter(tuple(seq[j:j + 2]) for j in range(len(seq) - 1))
+        sig = grams.most_common(1)[0][0] if grams else ("-",)
+        segs.append({"a": a, "b": b, "sig": sig})
+    # name by repetition of signature
+    sig_count = Counter(s["sig"] for s in segs)
+    chorus_sig = sig_count.most_common(1)[0][0] if sig_count else None
+    out, verse_n = [], 0
+    for idx, s in enumerate(segs):
+        if idx == 0 and sig_count[s["sig"]] == 1:
+            name = "intro"
+        elif s["sig"] == chorus_sig and sig_count[chorus_sig] > 1:
+            name = "chorus"
+        elif sig_count[s["sig"]] > 1:
+            verse_n += 1
+            name = f"verse {verse_n}"
+        else:
+            name = "bridge"
+        out.append({"name": name,
+                    "start": round(beats[s["a"]], 2),
+                    "end": round(beats[s["b"]], 2)})
+    # merge adjacent same-name
+    merged = []
+    for s in out:
+        if merged and merged[-1]["name"] == s["name"]:
+            merged[-1]["end"] = s["end"]
+        else:
+            merged.append(s)
+    return merged if len(merged) > 1 else []
+
+
+def _strumming(tab: dict, beats: list):
+    """Rhythm-hand pattern: histogram of rhythm-voice onsets on an 8-slot
+    (eighth-note) bar grid. On-beat hits read as Down, off-beat as Up."""
+    import bisect
+    rhythm = [n for n in tab.get("notes", []) if n.get("voice") == "rhythm"]
+    if len(rhythm) < 24 or len(beats) < 8:
+        return None
+    hist = [0.0] * 8
+    for n in rhythm:
+        i = bisect.bisect_right(beats, n["start"]) - 1
+        if i < 0 or i + 1 >= len(beats):
+            continue
+        span = beats[i + 1] - beats[i]
+        if span <= 0:
+            continue
+        frac = (n["start"] - beats[i]) / span
+        slot = (i % 4) * 2 + (1 if 0.3 <= frac < 0.8 else 0)
+        hist[slot] += 1.0
+    peak = max(hist) or 1.0
+    marks = []
+    for s in range(8):
+        if hist[s] >= 0.45 * peak:
+            marks.append("D" if s % 2 == 0 else "U")
+        else:
+            marks.append("·")
+    hit_avg = sum(h for h in hist if h >= 0.45 * peak) / max(1, sum(1 for h in hist if h >= 0.45 * peak))
+    conf = min(1.0, hit_avg / (sum(hist) / 8 + 1e-9) / 2)
+    return {"pattern": " ".join(marks), "confidence": round(conf, 2)}
+
+
 def build_analysis(tab: dict) -> dict:
     tonic, major = _key_of(tab)
     chords = [c for c in tab.get("chords", [])
@@ -189,6 +286,17 @@ def build_analysis(tab: dict) -> dict:
 
     # ── Solo scales ───────────────────────────────────────────────────────────
     out["solo_scales"] = _pent_positions(tonic, major) if tonic is not None else []
+
+    # ── Sections + strumming (both from beat-synced data, no audio pass) ─────
+    beats_list = tab.get("beats", [])
+    try:
+        out["sections"] = _detect_sections(chords, beats_list)
+    except Exception:  # noqa: BLE001
+        out["sections"] = []
+    try:
+        out["strumming"] = _strumming(tab, beats_list)
+    except Exception:  # noqa: BLE001
+        out["strumming"] = None
 
     # ── Difficulty profile (1..5 each) ────────────────────────────────────────
     dur = float(meta.get("duration_sec") or (chords[-1]["end"] if chords else 0) or 1)

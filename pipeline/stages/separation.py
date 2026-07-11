@@ -24,6 +24,7 @@ class SeparationResult:
     guitar_stem_path: Path
     duration_seconds: float
     source_file: Path
+    warning: str = ""   # e.g. "stem nearly silent" — surfaced in the UI
 
 
 # Cache loaded models (keyed by model file) so repeated calls in one process
@@ -217,6 +218,7 @@ def separate_guitar(audio_path: str | Path, instrument: str = "guitar",
 
     # A near-silent stem means the song doesn't contain this instrument —
     # transcribing bleed produces garbage notes and chords.
+    warning = ""
     if instrument != "all":
         try:
             import numpy as np
@@ -224,9 +226,9 @@ def separate_guitar(audio_path: str | Path, instrument: str = "guitar",
             probe, _sr = sf.read(str(guitar_stem_path), frames=44100 * 60, dtype="float32")
             rms = float(np.sqrt(np.mean(np.square(probe))))
             if rms < 0.01:
-                print(f"  ⚠ The '{instrument}' stem is nearly silent (RMS {rms:.4f}) — "
-                      f"this song may not contain a {instrument}. "
-                      f"Reprocess with Instrument = 'All instruments' for usable notes.")
+                warning = (f"The '{instrument}' stem is nearly silent — this song may not "
+                           f"contain a {instrument}. Reprocess with Instrument = 'All instruments'.")
+                print(f"  ⚠ {warning}")
         except Exception:  # noqa: BLE001
             pass
 
@@ -234,4 +236,5 @@ def separate_guitar(audio_path: str | Path, instrument: str = "guitar",
         guitar_stem_path=guitar_stem_path,
         duration_seconds=elapsed,
         source_file=audio_path,
+        warning=warning,
     )

@@ -374,13 +374,30 @@ def reprocess_job(job_id: str, req: ReprocessRequest) -> JSONResponse:
     src = _find_source_audio(job.song_stem)
     audio_path = src if src else (INPUT_DIR / f"{job_id}.mp3")
     stored = _processed_instrument(job.song_stem) or "guitar"
+
+    # Tiles songs re-run the VIDEO pipeline (e.g. after changing tiles knobs
+    # in tuning.json) — the audio path would look for stems that don't exist.
+    if stored == "tiles":
+        vdir = INPUT_DIR.parent / "video"
+        video = next((p for ext in (".mp4", ".webm", ".mkv", ".mov")
+                      for p in [vdir / f"{job.song_stem}{ext}"] if p.exists()), None)
+        if video is None:
+            with _lock:
+                job.status = "error"; job.error = "tiles video file missing — re-add the song"
+            raise HTTPException(404, "video file for this tiles song is gone")
+        _queue.put((job_id, audio_path, "tiles", {
+            "tiles": True, "video_path": str(video),
+            "reprocess": True, "run_beats": req.run_beats,
+        }))
+        return JSONResponse({"job_id": job_id})
+
     instrument = req.instrument or stored
     retranscribe = instrument != stored   # different stem → notes must be redone
-    
+
     _queue.put((
-        job_id, 
-        audio_path, 
-        instrument, 
+        job_id,
+        audio_path,
+        instrument,
         {
             "run_beats": req.run_beats,
             "run_vocals": req.run_vocals,
