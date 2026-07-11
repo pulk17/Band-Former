@@ -78,6 +78,18 @@ SKYLINE_GAP = _knob("arrange", "skyline_gap_semitones", 5)  # top-of-strum melod
 GHOST_MAX_DUR = _knob("arrange", "harmonic_ghost_max_dur", 0.09)  # chord-clash ghost filter
 
 
+def _refresh_knobs():
+    """Re-read tuning.json so in-app knob edits apply to the NEXT arrange run
+    without a server restart (module constants freeze at import otherwise)."""
+    global GHOST_DUR, MELODY_MIN_DUR, MIN_CHORD_DUR, LEAD_MAX_POLY, SKYLINE_GAP, GHOST_MAX_DUR
+    GHOST_DUR = _knob("arrange", "ghost_dur", 0.07)
+    MELODY_MIN_DUR = _knob("arrange", "melody_min_dur", 0.10)
+    MIN_CHORD_DUR = _knob("arrange", "min_chord_dur", 0.45)
+    LEAD_MAX_POLY = _knob("arrange", "lead_max_poly", 2)
+    SKYLINE_GAP = _knob("arrange", "skyline_gap_semitones", 5)
+    GHOST_MAX_DUR = _knob("arrange", "harmonic_ghost_max_dur", 0.09)
+
+
 def _parse(name: str):
     if ":" not in name:
         return None
@@ -289,6 +301,7 @@ def drop_harmonic_ghosts(notes, chords):
 
 
 def arrange(tab: dict) -> dict:
+    _refresh_knobs()
     raw = tab.get("notes", [])
     notes = declutter(raw, GHOST_DUR)          # drop ghosts from the displayed set too
     notes = drop_harmonic_ghosts(notes, tab.get("chords", []))

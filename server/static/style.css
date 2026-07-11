@@ -268,3 +268,16 @@ button.danger:hover { background: #2a1818; border-color: var(--bad); }
 .settingRow input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
 .settingRow select { margin-left: auto; min-width: 150px; }
 #runSettingsBtn { margin-top: 8px; padding: 10px; font-size: 14px; font-weight: 600; border-radius: 8px; width: 100%; display: flex; justify-content: center; }
+#redoVocalsBtn { padding: 9px; border-radius: 8px; width: 100%; display: flex; justify-content: center; }
+
+/* ── Tuning modal ────────────────────────────────────────── */
+.tuningCard { width: min(680px, 94vw); display: flex; flex-direction: column; }
+.tuningBody { overflow-y: auto; max-height: 62vh; padding: 6px 18px 12px; }
+.tunSec { margin: 14px 0 6px; font-size: 12px; color: var(--muted); letter-spacing: 1.5px; text-transform: uppercase; }
+.tunRow { display: grid; grid-template-columns: 190px 90px 1fr; align-items: center; gap: 10px; padding: 3px 0; }
+.tunLbl { font-size: 13px; }
+.tunRow.changed .tunLbl { color: var(--accent); font-weight: 600; }
+.tunRow input, .tunRow select { padding: 4px 7px; font-size: 12.5px; width: 100%; }
+.tunHint { color: var(--muted); font-size: 11.5px; }
+.tuningFoot { display: flex; gap: 8px; padding: 12px 18px; border-top: 1px solid var(--border); }
+.tuningFoot .primary { margin-left: auto; }

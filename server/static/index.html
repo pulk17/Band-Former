@@ -35,6 +35,7 @@
           <option value="other">Other</option>
         </select>
         <button id="settingsBtn" title="Processing options">⚙</button>
+        <button id="tuningBtn" title="Accuracy tuning — every detection knob, adjustable in-app">Tune</button>
       </div>
       <label class="tilesChk" title="Synthesia-style falling-tiles video: notes read from the VIDEO (near-exact) instead of audio transcription">
         <input type="checkbox" id="tilesChk" /> Piano-tiles video
@@ -148,6 +149,17 @@
       <label class="settingRow"><input type="checkbox" id="optBeats" checked> Extract Beats</label>
       <label class="settingRow"><input type="checkbox" id="optVocals" checked> Extract Vocals</label>
       <label class="settingRow">
+        Instrument (reprocess):
+        <select id="optInst" title="'Keep current' reuses the song's stem. Picking a different one forces re-transcription from that stem.">
+          <option value="">Keep current</option>
+          <option value="guitar">Guitar</option>
+          <option value="all">All instruments</option>
+          <option value="piano">Piano</option>
+          <option value="bass">Bass</option>
+          <option value="other">Other</option>
+        </select>
+      </label>
+      <label class="settingRow">
         Vocal Model:
         <select id="optVocalModel">
           <option value="auto">Auto</option>
@@ -157,6 +169,19 @@
       </label>
       <button id="runSettingsBtn" class="primary">Apply & Run</button>
       <button id="redoVocalsBtn" title="Re-extract only the vocals of the current song with the model chosen above — runs in the background, no full reprocess">Redo vocals only (background)</button>
+    </div>
+  </div>
+</div>
+
+<!-- tuning modal -->
+<div id="tuningModal" class="modal hidden">
+  <div class="modalCard tuningCard">
+    <div class="modalHead"><span>Accuracy Tuning</span><button id="tuningClose">✕</button></div>
+    <div id="tuningBody" class="tuningBody"></div>
+    <div class="tuningFoot">
+      <button id="tuningReset" title="Fill every field with its factory default (not saved until you hit Save)">Reset all</button>
+      <button id="tuningSave">Save</button>
+      <button id="tuningApply" class="primary" title="Save, then reprocess the current song so you hear the difference">Save &amp; reprocess song</button>
     </div>
   </div>
 </div>

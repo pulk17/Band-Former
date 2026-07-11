@@ -38,5 +38,17 @@
     "hold_seconds": 0.08,
     "gap_seconds": 0.06,
     "min_note_seconds": 0.05
+  },
+
+  "tiles": {
+    "sat_min": 70,
+    "val_min": 70,
+    "artifact_margin_px": 14,
+    "min_note_ms": 60,
+    "gap_close_ms": 50,
+    "highlight_delta": 32,
+    "white_center_frac": 0.5,
+    "keyboard_y_override": 0,
+    "leftmost_midi_override": 0
   }
 }

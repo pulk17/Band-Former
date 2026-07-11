@@ -969,7 +969,10 @@
           run_beats: $("optBeats").checked,
           run_vocals: $("optVocals").checked,
           vocal_model: $("optVocalModel").value,
-          instrument: $("instSel").value   // switch stem on reprocess (e.g. guitar → all)
+          // "" = keep the song's stored instrument. The sidebar dropdown is
+          // NOT used here — it's for new adds and would silently force a
+          // re-transcription on every reprocess.
+          instrument: $("optInst").value
         })
       });
       if (!r.ok) {
@@ -1015,8 +1018,116 @@
     setTimeout(tick, 2500);
   };
 
+  // ── Tuning panel: every pipeline knob, editable in-app ────────────────────
+  const TUNING_SECTIONS = {
+    chord:   "Chords",
+    chroma:  "Note detection (chroma)",
+    arrange: "Lead / rhythm & note cleanup",
+    vocals:  "Vocals",
+    tiles:   "Piano-tiles video",
+  };
+  const TUNING_HINTS = {
+    "chord.transition_penalty": "higher = chords change less often",
+    "chord.complexity_penalty": "higher = plain maj/min preferred over maj7/7ths",
+    "chord.thirdless_penalty": "higher = fewer sus2/sus4/5 chords",
+    "chord.bass_bonus": "higher = trust the bass note for the root",
+    "chord.gate_tau": "higher = color chords (7ths/sus) need clearer evidence",
+    "chord.key_penalty": "higher = chords forced into the detected key",
+    "chord.silence_threshold": "lower = quiet intros still get chords",
+    "chord.no_chord_floor": "raise toward 0 = weak sections become 'unknown'",
+    "chord.slash_bass_mass": "lower = more slash chords (G/B)",
+    "chord.key_window_segs": "lower = adapts to key changes faster",
+    "chord.miss_weight": "higher = off-chord notes hurt more",
+    "chord.absent_weight": "higher = missing chord tones hurt more",
+    "chord.absent_tau": "how loud a chord tone must be to count",
+    "chroma.q_mult": "higher = cleaner note separation, slower (1.5–2.5)",
+    "chroma.lateral_inhibition": "higher = less bleed between neighbor notes",
+    "arrange.ghost_dur": "notes shorter than this (s) are dropped",
+    "arrange.melody_min_dur": "min length (s) for a lead-line note",
+    "arrange.min_chord_dur": "chord blips shorter than this (s) get merged",
+    "arrange.lead_max_poly": "1 = strict single-note lead, 2 = allow doublestops",
+    "arrange.skyline_gap_semitones": "lower = more strum-top notes join the lead",
+    "arrange.harmonic_ghost_max_dur": "short off-chord notes under this (s) dropped",
+    "vocals.crepe_model": "full = accurate, tiny = fast",
+    "vocals.periodicity_threshold": "lower = catches quiet singing, more ghosts",
+    "vocals.split_semitones": "higher = vibrato stays one note",
+    "vocals.hold_seconds": "how long a pitch move must hold to be a new note",
+    "vocals.gap_seconds": "silence longer than this (s) ends a note",
+    "vocals.min_note_seconds": "vocal notes shorter than this are dropped",
+    "tiles.sat_min": "lower if tiles are pastel-colored",
+    "tiles.val_min": "lower for dark/dim videos",
+    "tiles.artifact_margin_px": "raise if hit-line sparkles create junk notes",
+    "tiles.min_note_ms": "shortest believable note from the video",
+    "tiles.gap_close_ms": "flicker gaps shorter than this get bridged",
+    "tiles.highlight_delta": "key grey-out sensitivity (no-tiles videos)",
+    "tiles.white_center_frac": "how much of each white key is sampled",
+    "tiles.keyboard_y_override": "manual keyboard top (px), 0 = auto",
+    "tiles.leftmost_midi_override": "manual leftmost key MIDI, 0 = auto",
+  };
+  let tuningDefaults = null;
+
+  function labelize(k) { return k.replace(/_/g, " "); }
+  function renderTuning(defaults, current) {
+    const body = $("tuningBody");
+    body.innerHTML = Object.keys(TUNING_SECTIONS).map((sec) => {
+      const rows = Object.entries(defaults[sec] || {}).map(([k, dv]) => {
+        const cur = (current[sec] || {})[k];
+        const val = cur === undefined ? dv : cur;
+        const hint = TUNING_HINTS[sec + "." + k] || "";
+        const input = (typeof dv === "string")
+          ? `<select data-sec="${sec}" data-key="${k}">
+               <option value="full" ${val === "full" ? "selected" : ""}>full</option>
+               <option value="tiny" ${val === "tiny" ? "selected" : ""}>tiny</option>
+             </select>`
+          : `<input type="number" step="any" data-sec="${sec}" data-key="${k}" value="${val}" data-def="${dv}" />`;
+        const changed = cur !== undefined && cur !== dv ? " changed" : "";
+        return `<div class="tunRow${changed}"><span class="tunLbl" title="${sec}.${k}">${labelize(k)}</span>${input}<span class="tunHint">${hint}</span></div>`;
+      }).join("");
+      return `<h4 class="tunSec">${TUNING_SECTIONS[sec]}</h4>${rows}`;
+    }).join("");
+  }
+  function collectTuning() {
+    const out = {};
+    $("tuningBody").querySelectorAll("[data-sec]").forEach((el) => {
+      const sec = el.dataset.sec, k = el.dataset.key;
+      out[sec] = out[sec] || {};
+      out[sec][k] = el.tagName === "SELECT" ? el.value : parseFloat(el.value);
+    });
+    return out;
+  }
+  async function saveTuning() {
+    const r = await fetch("/api/tuning", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(collectTuning()),
+    });
+    if (!r.ok) { $("status").textContent = "Tuning save failed"; return false; }
+    return true;
+  }
+  $("tuningBtn").onclick = async () => {
+    const d = await (await fetch("/api/tuning")).json();
+    tuningDefaults = d.defaults;
+    renderTuning(d.defaults, d.current || {});
+    $("tuningModal").classList.remove("hidden");
+  };
+  $("tuningClose").onclick = () => $("tuningModal").classList.add("hidden");
+  $("tuningModal").onclick = (e) => { if (e.target.id === "tuningModal") $("tuningModal").classList.add("hidden"); };
+  $("tuningReset").onclick = () => { if (tuningDefaults) renderTuning(tuningDefaults, {}); };
+  $("tuningSave").onclick = async () => { if (await saveTuning()) $("tuningModal").classList.add("hidden"); };
+  $("tuningApply").onclick = async () => {
+    if (!(await saveTuning())) return;
+    $("tuningModal").classList.add("hidden");
+    if (!curJob) { $("status").textContent = "Saved. Load a song to hear it applied."; return; }
+    showOverlay("Reprocessing with new tuning…", "");
+    const r = await fetch(`/api/reprocess/${curJob}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ run_beats: true, run_vocals: true, vocal_model: $("optVocalModel").value }),
+    });
+    if (!r.ok) { let dd = ""; try { dd = (await r.json()).detail; } catch (e) {} showOverlay("Reprocess failed", dd || `HTTP ${r.status}`); return; }
+    poll(curJob);
+  };
+
   document.addEventListener("keydown", (e) => {
-    if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+    if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT" || e.target.tagName === "BUTTON") return;
     if (e.code === "Space") { e.preventDefault(); toggle(); }
     else if (e.code === "ArrowRight") seekTo(songTime() + 5);
     else if (e.code === "ArrowLeft") seekTo(songTime() - 5);

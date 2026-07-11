@@ -409,6 +409,83 @@ def reprocess_job(job_id: str, req: ReprocessRequest) -> JSONResponse:
     return JSONResponse({"job_id": job_id})
 
 
+# ── Tuning knobs (in-app editor for tuning.json) ─────────────────────────────
+# Factory defaults double as the editor's schema: sections, keys, and reset
+# values. tuning.json overrides these; the pipeline re-reads it per run.
+TUNING_FACTORY = {
+    "chroma": {"q_mult": 1.8, "lateral_inhibition": 0.30},
+    "chord": {
+        "silence_threshold": 0.02, "transition_penalty": 0.15,
+        "complexity_penalty": 0.15, "bass_bonus": 0.8, "no_chord_floor": -0.5,
+        "key_penalty": 0.03, "thirdless_penalty": 0.05, "slash_bass_mass": 0.35,
+        "key_window_segs": 16, "gate_tau": 0.09, "miss_weight": 0.6,
+        "absent_weight": 1.5, "absent_tau": 0.08,
+    },
+    "arrange": {
+        "ghost_dur": 0.07, "melody_min_dur": 0.10, "min_chord_dur": 0.45,
+        "lead_max_poly": 2, "skyline_gap_semitones": 5, "harmonic_ghost_max_dur": 0.09,
+    },
+    "vocals": {
+        "crepe_model": "full", "periodicity_threshold": 0.21,
+        "split_semitones": 0.6, "hold_seconds": 0.08, "gap_seconds": 0.06,
+        "min_note_seconds": 0.05,
+    },
+    "tiles": {
+        "sat_min": 70, "val_min": 70, "artifact_margin_px": 14,
+        "min_note_ms": 60, "gap_close_ms": 50, "highlight_delta": 32,
+        "white_center_frac": 0.5, "keyboard_y_override": 0, "leftmost_midi_override": 0,
+    },
+}
+_TUNING_PATH = Path(__file__).resolve().parent.parent / "tuning.json"
+
+
+@app.get("/api/tuning")
+def get_tuning() -> dict:
+    current = {}
+    try:
+        current = json.loads(_TUNING_PATH.read_text())
+    except Exception:  # noqa: BLE001
+        pass
+    return {"defaults": TUNING_FACTORY, "current": current}
+
+
+@app.post("/api/tuning")
+def set_tuning(body: dict) -> JSONResponse:
+    """Persist knob values. Only known sections/keys are written; values equal
+    to factory defaults are still written (explicit is fine — file is small)."""
+    clean: dict = {}
+    for sec, keys in TUNING_FACTORY.items():
+        if sec not in body or not isinstance(body[sec], dict):
+            continue
+        for k, dv in keys.items():
+            if k not in body[sec]:
+                continue
+            v = body[sec][k]
+            if isinstance(dv, bool):
+                v = bool(v)
+            elif isinstance(dv, int) and not isinstance(dv, bool):
+                try:
+                    v = int(v)
+                except (TypeError, ValueError):
+                    continue
+            elif isinstance(dv, float):
+                try:
+                    v = float(v)
+                except (TypeError, ValueError):
+                    continue
+            elif isinstance(dv, str):
+                v = str(v)
+            clean.setdefault(sec, {})[k] = v
+    keep = {}
+    try:   # preserve unknown top-level keys like _readme
+        keep = {k: v for k, v in json.loads(_TUNING_PATH.read_text()).items()
+                if k not in TUNING_FACTORY}
+    except Exception:  # noqa: BLE001
+        pass
+    _TUNING_PATH.write_text(json.dumps({**keep, **clean}, indent=2))
+    return JSONResponse({"ok": True})
+
+
 @app.get("/api/jobs")
 def list_jobs() -> dict:
     with _lock:

@@ -10,8 +10,8 @@ except Exception:  # noqa: BLE001
     def _knob(_s, _k, d):
         return d
 
-_CREPE_MODEL = _knob("vocals", "crepe_model", "full")
-_PERIODICITY = _knob("vocals", "periodicity_threshold", 0.21)
+def _crepe_model(): return _knob("vocals", "crepe_model", "full")
+def _periodicity(): return _knob("vocals", "periodicity_threshold", 0.21)
 
 logger = logging.getLogger(__name__)
 
@@ -247,7 +247,7 @@ def _extract_vocals_crepe(audio_path: Path) -> list[NoteEvent]:
         audio, sr, hop_length,
         fmin=65.0,   # C2
         fmax=2093.0, # C7
-        model=_CREPE_MODEL,
+        model=_crepe_model(),
         batch_size=512,
         device=device,
         return_periodicity=True,
@@ -272,7 +272,7 @@ def _extract_vocals_crepe(audio_path: Path) -> list[NoteEvent]:
     import librosa
 
     times = np.arange(len(pitch)) * hop_length / sr
-    voiced = periodicity > _PERIODICITY
+    voiced = periodicity > _periodicity()
     midi = librosa.hz_to_midi(np.maximum(pitch, 1e-6))
 
     notes = [NoteEvent(start_time=a, end_time=b, pitch=p, velocity=1.0)
@@ -347,7 +347,7 @@ def _contour_crepe(audio_path: Path) -> list[list]:
     device = DEVICE if DEVICE.type == "cuda" else torch.device("cpu")
     hop = 160  # 10 ms
     pitch, periodicity = torchcrepe.predict(
-        audio, sr, hop, fmin=65.0, fmax=2093.0, model=_CREPE_MODEL,
+        audio, sr, hop, fmin=65.0, fmax=2093.0, model=_crepe_model(),
         batch_size=512, device=device, return_periodicity=True,
     )
     periodicity = torchcrepe.filter.median(periodicity, 5)
@@ -361,7 +361,7 @@ def _contour_crepe(audio_path: Path) -> list[list]:
     times = np.arange(len(pitch)) * hop / sr
     out: list[list] = []
     for t, p, pr in zip(times, pitch, periodicity):
-        voiced = pr > _PERIODICITY and p > 0
+        voiced = pr > _periodicity() and p > 0
         out.append([round(float(t), 3), round(float(librosa.hz_to_midi(float(p))), 2) if voiced else None])
     return out
 
