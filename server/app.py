@@ -557,6 +557,11 @@ def rename_job(job_id: str, req: RenameRequest) -> dict:
         src = INPUT_DIR / f"{job.song_stem}{ext}"
         if src.exists():
             src.rename(INPUT_DIR / f"{new_stem}{ext}")
+    vdir = INPUT_DIR.parent / "video"            # rename the tiles video too,
+    for ext in (".mp4", ".webm", ".mkv", ".mov"):  # or tiles reprocess breaks
+        v = vdir / f"{job.song_stem}{ext}"
+        if v.exists():
+            v.rename(vdir / f"{new_stem}{ext}")
     old_dir = OUTPUT_DIR / job.song_stem         # rename the output folder
     if old_dir.is_dir():
         old_dir.rename(OUTPUT_DIR / new_stem)
@@ -586,6 +591,12 @@ def delete_job(job_id: str) -> dict:
         p = INPUT_DIR / f"{job.song_stem}{ext}"
         if p.exists():
             try: p.unlink()
+            except OSError: pass
+    vdir = INPUT_DIR.parent / "video"            # tiles source video, if any
+    for ext in (".mp4", ".webm", ".mkv", ".mov"):
+        v = vdir / f"{job.song_stem}{ext}"
+        if v.exists():
+            try: v.unlink()
             except OSError: pass
     return {"ok": err is None, "error": err, "still_exists": d.exists()}
 
