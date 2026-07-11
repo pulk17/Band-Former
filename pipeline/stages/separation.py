@@ -92,13 +92,16 @@ def ensure_chord_mix(stem_output_dir: Path) -> Path | None:
 
 
 def separate_guitar(audio_path: str | Path, instrument: str = "guitar",
-                    quality: str | None = None) -> SeparationResult:
+                    quality: str | None = None, on_stage=None) -> SeparationResult:
     """Separate a stem from a full mix and return it for transcription.
 
     quality="best" (default): two-stage — BS-Roformer first (SOTA vocals +
     clean instrumental), then htdemucs_6s splits the *instrumental* into
     guitar/bass/piano/drums/other. Vocals come from the Roformer (far cleaner
-    for pitch tracking) and the guitar stem has no vocal bleed.
+    for pitch tracking) and the guitar stem has no vocal bleed. This is why the
+    UI shows "separating stems" twice in a row — it's not a bug, it's two real
+    neural-net passes; on_stage lets the caller label them distinctly instead
+    of leaving the user staring at the same message twice.
 
     quality="fast": single htdemucs_6s pass on the original mix (old behavior).
 
@@ -106,6 +109,10 @@ def separate_guitar(audio_path: str | Path, instrument: str = "guitar",
     instrumental stem (so overlapping notes are quantified once, not per stem)."""
     audio_path = Path(audio_path)
     quality = quality or SEPARATION_QUALITY
+
+    def report(stage: str):
+        if on_stage:
+            on_stage(stage)
 
     if not audio_path.exists():
         raise FileNotFoundError(f"Input audio file not found: {audio_path}")
@@ -130,6 +137,7 @@ def separate_guitar(audio_path: str | Path, instrument: str = "guitar",
     demucs_input = audio_path
     if quality == "best":
         try:
+            report("Separating stems (1/2 — vocal split)")
             sep_a = _get_separator(VOCAL_SPLIT_MODEL, stem_output_dir)
             logger.info("Stage A: BS-Roformer vocal split...")
             sep_a.separate(str(audio_path), custom_output_names={
@@ -146,6 +154,8 @@ def separate_guitar(audio_path: str | Path, instrument: str = "guitar",
             demucs_input = audio_path
 
     # ── Stage B: htdemucs_6s six-stem split ──────────────────────────────────
+    report("Separating stems (2/2 — instrument split)" if quality == "best"
+           else "Separating stems")
     separator = _get_separator(f"{SEPARATION_MODEL}.yaml", stem_output_dir)
     logger.info("Running HTDemucs separation on '%s'...", demucs_input.name)
     two_stage = demucs_input != audio_path

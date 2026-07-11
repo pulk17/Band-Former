@@ -10,17 +10,23 @@
 
   // ── Data ──────────────────────────────────────────────────────────────────
   // (Chords arrive beat-synchronous from the engine — no client smoothing.)
-  let tab = null, allNotes = [], melodyNotes = [], harmonyNotes = [], chords = [], beats = [], duration = 0;
+  let tab = null, allNotes = [], melodyNotes = [], harmonyNotes = [], chords = [], chordsRaw = [], beats = [], duration = 0;
+  let barMode = false;   // "Bars": one chord per bar (dominant by coverage)
   let vocals = [], vpitch = [], vlo = 48, vhi = 72;
   let roll = [];   // tiles videos: exact piano notes {start,duration,pitch,hand}
+  let rlo = 48, rhi = 72;   // roll view's smoothed, auto-following pitch window
   let view = "overview", content = "both", capo = 0, recommendedCapo = 0, curJob = null;
   let analysis = {};   // tab.analysis — romans, functions, difficulty, practice…
 
   // ── Chord voicings (computed live so any capo can be selected) ────────────
   const NOTE_PC = { C: 0, "C#": 1, D: 2, "D#": 3, E: 4, F: 5, "F#": 6, G: 7, "G#": 8, A: 9, "A#": 10, B: 11 };
   const PC_NOTE = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+  // Kept in sync with arrange.py's SHAPES — every quality the chord engine
+  // can emit needs an entry or its diagram silently never renders, capo or not.
   const BARRE = { maj: [0,2,2,1,0,0], min: [0,2,2,0,0,0], "5": [0,2,2,-1,-1,-1],
-                  "7": [0,2,0,1,0,0], maj7: [0,2,1,1,0,0], min7: [0,2,0,0,0,0], sus4: [0,2,2,2,0,0] };
+                  "7": [0,2,0,1,0,0], maj7: [0,2,1,1,0,0], min7: [0,2,0,0,0,0], sus4: [0,2,2,2,0,0],
+                  sus2: [0,2,4,4,0,0], add9: [0,2,2,1,0,2], "6": [0,2,2,1,2,0],
+                  dim: [0,1,2,0,-1,0], aug: [0,3,2,1,1,0], m7b5: [0,1,0,0,-1,0] };
   const OPEN = {
     "0|maj":["C",[-1,3,2,0,1,0]],"2|maj":["D",[-1,-1,0,2,3,2]],"4|maj":["E",[0,2,2,1,0,0]],
     "7|maj":["G",[3,2,0,0,0,3]],"9|maj":["A",[-1,0,2,2,2,0]],
@@ -106,7 +112,9 @@
     updateSteps(stg);
   }
   function updateSteps(currentStage) {
-    const idx = STEP_ORDER.indexOf(currentStage);
+    // Prefix match: two-stage separation reports "Separating stems (1/2 — …)"
+    // etc. — those still light up the "Separating stems" step.
+    const idx = STEP_ORDER.findIndex((s) => currentStage && currentStage.startsWith(s));
     document.querySelectorAll(".pStep").forEach((el) => {
       const stepIdx = STEP_ORDER.indexOf(el.dataset.step);
       el.classList.remove("done", "active");
@@ -182,8 +190,9 @@
     allNotes = (tab.notes || []).slice().sort((a, b) => a.start - b.start);
     melodyNotes = allNotes.filter((n) => n.voice === "lead" || n.melody);
     harmonyNotes = allNotes.filter((n) => !(n.voice === "lead" || n.melody));
-    chords = (tab.chords || []).slice().sort((a, b) => a.start - b.start);
+    chordsRaw = (tab.chords || []).slice().sort((a, b) => a.start - b.start);
     beats = tab.beats || [];
+    chords = barMode ? quantizeToBars(chordsRaw) : chordsRaw;
     vocals = (tab.vocals || []).slice().sort((a, b) => a.start - b.start);
     vpitch = tab.vocal_pitch || [];
     if (vocals.length) { const ps = vocals.map((n) => n.pitch); vlo = Math.min(...ps) - 3; vhi = Math.max(...ps) + 3; }
@@ -302,6 +311,32 @@
       else { const pos = open ? val : (val - startFret + 1); const y = padT + (pos - 0.5) * fy; s += `<circle cx="${x}" cy="${y}" r="${size * 0.072}" fill="#ffffff"/>`; }
     }
     return s + "</svg>";
+  }
+
+  // Bar quantize: one chord per bar (groups of 4 beats), chosen by which
+  // chord covers the most of that bar. Same-name bars merge. The engine's
+  // beat-level changes stay available by toggling off.
+  function quantizeToBars(list) {
+    if (!beats.length || beats.length < 5 || !list.length) return list;
+    const bars = [];
+    for (let i = 0; i < beats.length; i += 4) bars.push(beats[i]);
+    bars.push(Math.max(duration, beats[beats.length - 1]));
+    const out = [];
+    for (let b = 0; b < bars.length - 1; b++) {
+      const s = bars[b], e = bars[b + 1];
+      if (e - s <= 0) continue;
+      const cover = new Map();
+      for (const c of list) {
+        const ov = Math.min(e, c.end) - Math.max(s, c.start);
+        if (ov > 0) cover.set(c.name, (cover.get(c.name) || 0) + ov);
+      }
+      if (!cover.size) continue;
+      const name = [...cover.entries()].sort((x, y) => y[1] - x[1])[0][0];
+      if (out.length && out[out.length - 1].name === name && out[out.length - 1].end >= s - 0.01)
+        out[out.length - 1].end = e;
+      else out.push({ name, start: s, end: e, confidence: 1 });
+    }
+    return out.length ? out : list;
   }
 
   function uniqueChords() {
@@ -627,11 +662,9 @@
       nl.innerHTML = up.map((c) => {
         const vv = voicingOf(c);
         const shape = (capo > 0 && vv) ? `<span class="ni-shape">${vv.name}</span>` : "";
-        return `<div class="nextItem">${chordSVG(vv, 66)}<div class="ni-meta"><b>${c.name}</b>${shape}<span class="ni-in"></span></div></div>`;
+        return `<div class="nextItem">${chordSVG(vv, 48)}<div class="ni-meta"><b>${c.name}</b>${shape}</div></div>`;
       }).join("");
     }
-    const ins = nl.querySelectorAll(".ni-in");
-    up.forEach((c, i) => { if (ins[i]) ins[i].textContent = "in " + Math.max(0, c.start - t).toFixed(1) + "s"; });
   }
 
   function drawTab(t) {
@@ -732,22 +765,34 @@
     if (!roll.length) return;
     const nowX = Math.round(W * NOW), padT = 14, padB = 14;
     const tStart = t - nowX / PPS, tEnd = t + (W - nowX) / PPS;
-    let lo = 127, hi = 0;
-    for (const n of roll) { lo = Math.min(lo, n.pitch); hi = Math.max(hi, n.pitch); }
-    lo -= 2; hi += 2;
-    const span = Math.max(12, hi - lo);
-    const yOf = (p) => padT + (H - padT - padB) * (1 - (p - lo) / span);
-    const nh = Math.max(3, Math.min(14, (H - padT - padB) / span * 0.8));
+
+    // Auto-follow: window to what's actually playing right now (± a few
+    // seconds), smoothly easing toward it — same idea as the vocals view, so
+    // the roll zooms into the current register instead of showing the whole
+    // song's span squashed flat.
+    let lo = 1e9, hi = -1e9;
+    for (const n of roll) { if (n.start > t + 4 || n.start + n.duration < t - 2) continue; lo = Math.min(lo, n.pitch); hi = Math.max(hi, n.pitch); }
+    if (hi >= lo) {
+      const tlo = lo - 3, thi = hi + 3, f = playing ? 0.06 : 1;
+      rlo += (tlo - rlo) * f; rhi += (thi - rhi) * f;
+    }
+    const span = Math.max(8, rhi - rlo);
+    const yOf = (p) => padT + (H - padT - padB) * (1 - (p - rlo) / span);
+    const nh = Math.max(3, Math.min(16, (H - padT - padB) / span * 0.8));
+    const stepPx = yOf(rlo) - yOf(rlo + 1);
 
     rx.font = "10px system-ui"; rx.textBaseline = "middle";
-    for (let p = Math.ceil(lo); p <= hi; p++) {
+    for (let p = Math.ceil(rlo); p <= rhi; p++) {
       const isC = ((p % 12) + 12) % 12 === 0;
       const black = [1, 3, 6, 8, 10].includes(((p % 12) + 12) % 12);
       const y = yOf(p);
       if (black) { rx.fillStyle = "rgba(255,255,255,0.025)"; rx.fillRect(0, y - nh / 2, W, nh); }
-      if (isC) {
-        rx.strokeStyle = "rgba(255,255,255,0.12)"; rx.beginPath(); rx.moveTo(0, y + nh / 2); rx.lineTo(W, y + nh / 2); rx.stroke();
-        rx.fillStyle = "#888"; rx.textAlign = "left"; rx.fillText("C" + (Math.floor(p / 12) - 1), 5, y);
+      if (isC) { rx.strokeStyle = "rgba(255,255,255,0.12)"; rx.beginPath(); rx.moveTo(0, y + nh / 2); rx.lineTo(W, y + nh / 2); rx.stroke(); }
+      // Show every note name once there's room for the text; otherwise
+      // just the C octave markers, so it never turns into overlapping mush.
+      if (isC || stepPx >= 10) {
+        rx.fillStyle = isC ? "#bbb" : "#666"; rx.textAlign = "left";
+        rx.fillText(PC_NOTE[(((p % 12) + 12) % 12)] + (Math.floor(p / 12) - 1), 5, y);
       }
     }
     if (beats.length) { rx.strokeStyle = "rgba(255,255,255,0.05)"; for (const b of beats) { const x = nowX + (b - t) * PPS; if (x < 0 || x > W) continue; rx.beginPath(); rx.moveTo(x, padT); rx.lineTo(x, H - padB); rx.stroke(); } }
@@ -817,6 +862,12 @@
     dirty = true;
   };
   $("metroBtn").onclick = () => { metro = !metro; $("metroBtn").classList.toggle("on", metro); };
+  $("barsBtn").onclick = () => {
+    barMode = !barMode;
+    $("barsBtn").classList.toggle("on", barMode);
+    chords = barMode ? quantizeToBars(chordsRaw) : chordsRaw;
+    lastName = ""; buildChordGrid(); buildOverview(); buildLearn(); dirty = true;
+  };
 
   // settings modal
   let settingsReprocessJobId = null;
@@ -848,6 +899,41 @@
       }
       poll(settingsReprocessJobId);
     }
+  };
+
+  $("redoVocalsBtn").onclick = async () => {
+    const id = settingsReprocessJobId || curJob;
+    if (!id) { $("status").textContent = "Load a song first."; return; }
+    $("settingsModal").classList.add("hidden");
+    const r = await fetch(`/api/revocals/${id}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ vocal_model: $("optVocalModel").value }),
+    });
+    if (!r.ok) { $("status").textContent = "Vocals redo failed to start"; return; }
+    $("status").textContent = "Redoing vocals in the background…";
+    // quiet poll — no overlay, keep playing; reload data when done
+    const tick = async () => {
+      let s;
+      try { s = await (await fetch(`/api/status/${id}`)).json(); }
+      catch (e) { setTimeout(tick, 3000); return; }
+      if (s.status === "done") {
+        $("status").textContent = "";
+        if (curJob === id) {                       // refresh vocals without touching playback
+          const rr = await fetch(`/api/result/${id}`);
+          if (rr.ok) {
+            const t2 = await rr.json();
+            vocals = (t2.vocals || []).slice().sort((a, b) => a.start - b.start);
+            vpitch = t2.vocal_pitch || [];
+            if (vocals.length) { const ps = vocals.map((n) => n.pitch); vlo = Math.min(...ps) - 3; vhi = Math.max(...ps) + 3; }
+            $("viewSeg").querySelector('[data-view=vocals]').style.display = (vocals.length || vpitch.length) ? "" : "none";
+            dirty = true;
+          }
+        }
+      } else if (s.status === "error") {
+        $("status").textContent = "Vocals redo failed: " + ((s.error || "").split("\n").pop() || "");
+      } else setTimeout(tick, 2500);
+    };
+    setTimeout(tick, 2500);
   };
 
   document.addEventListener("keydown", (e) => {

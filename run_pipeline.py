@@ -90,10 +90,10 @@ def process_audio(audio_path: Path | str, instrument: str = "guitar", on_stage=N
         separation_result.guitar_stem_path = guitar_stem_path
         print(f"\n  ✓ Using existing guitar stem: {guitar_stem_path}\n")
     else:
-        report("Separating stems")
         print("=" * 60 + "\n  STAGE 1 — Source Separation\n" + "=" * 60)
         separation_result = separate_guitar(audio_path, instrument,
-                                            quality=options.get("separation_quality"))
+                                            quality=options.get("separation_quality"),
+                                            on_stage=report)
         out_dir = separation_result.guitar_stem_path.parent
         print(f"\n  ✓ Guitar stem : {separation_result.guitar_stem_path}")
         print(f"  ✓ Elapsed     : {separation_result.duration_seconds:.1f} s\n")
@@ -257,6 +257,41 @@ def process_audio(audio_path: Path | str, instrument: str = "guitar", on_stage=N
                 restore_vocals("vocals stage failed")
                 print(f"  ⚠ Vocals transcription failed: {exc}")
 
+    return out_dir
+
+
+def revocals_only(song_stem: str, vocal_model: str = "auto", on_stage=None) -> Path:
+    """Re-extract JUST the vocals of an already-processed song (different model,
+    or after a failed vocals stage) and merge them into its tab.json. Runs in
+    the same worker queue but takes seconds, not minutes — no separation, no
+    transcription."""
+    from pipeline.config import OUTPUT_DIR
+    from arrange import clean_monophonic
+
+    def report(stage: str):
+        if on_stage:
+            on_stage(stage)
+
+    out_dir = OUTPUT_DIR / song_stem
+    tab_json = out_dir / "tab.json"
+    if not tab_json.exists():
+        raise FileNotFoundError(f"No tab.json for '{song_stem}' — process the song first")
+    vcands = sorted(out_dir.glob("*[Vv]ocals*.wav"),
+                    key=lambda p: 0 if "roformer" in p.name.lower() else 1)
+    if not vcands:
+        raise FileNotFoundError(f"No vocals stem in {out_dir} — full reprocess needed")
+
+    report("Extracting vocals")
+    vstem = vcands[0]
+    vnotes = extract_vocals(vstem, model_choice=vocal_model)
+    vdicts = [{"start": n.start_time, "end": n.end_time, "pitch": n.pitch,
+               "duration": n.end_time - n.start_time, "name": midi_to_name(n.pitch)}
+              for n in vnotes]
+    data = json.loads(tab_json.read_text())
+    data["vocals"] = clean_monophonic(vdicts)
+    data["vocal_pitch"] = extract_vocal_contour(vstem, model_choice=vocal_model)
+    tab_json.write_text(json.dumps(data, indent=2))
+    print(f"  ✓ Vocals redone ({vocal_model}): {len(data['vocals'])} notes")
     return out_dir
 
 

@@ -28,10 +28,19 @@ NOTE_PC = {"C": 0, "C#": 1, "D": 2, "D#": 3, "E": 4, "F": 5,
 PC_NOTE = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
 # Movable E-shape voicings (root barred on the low E string); low E -> high E.
+# All six extra qualities below were verified by hand against the open-string
+# pitch classes they produce (E=4 A=9 D=2 G=7 B=11 e=4) — each must reduce to
+# exactly the chord's tone set, same as the original seven already did.
 SHAPES = {
     "maj":  [0, 2, 2, 1, 0, 0], "min":  [0, 2, 2, 0, 0, 0], "5": [0, 2, 2, -1, -1, -1],
     "7":    [0, 2, 0, 1, 0, 0], "maj7": [0, 2, 1, 1, 0, 0], "min7": [0, 2, 0, 0, 0, 0],
     "sus4": [0, 2, 2, 2, 0, 0],
+    "sus2": [0, 2, 4, 4, 0, 0],     # root-2-5, no 3rd
+    "add9": [0, 2, 2, 1, 0, 2],     # maj triad + 9th
+    "6":    [0, 2, 2, 1, 2, 0],     # maj triad + 6th
+    "dim":  [0, 1, 2, 0, -1, 0],    # root-b3-b5
+    "aug":  [0, 3, 2, 1, 1, 0],     # root-3-#5
+    "m7b5": [0, 1, 0, 0, -1, 0],    # root-b3-b5-b7 (half-diminished)
 }
 
 # Easy open chords, keyed by (pitch class, quality) -> (shape name, frets low E->high E).

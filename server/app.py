@@ -175,7 +175,7 @@ def _seed_existing_jobs() -> None:
 def _worker() -> None:
     """Single background worker: processes jobs sequentially, in-process, so the
     ML models loaded by the pipeline stages stay warm across uploads."""
-    from run_pipeline import process_audio, process_tiles_video
+    from run_pipeline import process_audio, process_tiles_video, revocals_only
     while True:
         job_id, audio_path, instrument, options = _queue.get()
         with _lock:
@@ -185,7 +185,11 @@ def _worker() -> None:
             with _lock:
                 _jobs[job_id].stage = stage_name
         try:
-            if options.get("tiles"):
+            if options.get("vocals_only"):
+                revocals_only(_jobs[job_id].song_stem,
+                              vocal_model=options.get("vocal_model", "auto"),
+                              on_stage=on_stage)
+            elif options.get("tiles"):
                 process_tiles_video(audio_path, options["video_path"],
                                     on_stage=on_stage, options=options)
             else:
@@ -335,6 +339,25 @@ class ReprocessRequest(BaseModel):
     run_vocals: bool = True
     vocal_model: str = "auto"
     instrument: str = ""   # empty = keep the instrument the song was processed with
+
+
+class RevocalsRequest(BaseModel):
+    vocal_model: str = "auto"
+
+
+@app.post("/api/revocals/{job_id}")
+def revocals_job(job_id: str, req: RevocalsRequest) -> JSONResponse:
+    """Re-extract just the vocals with a chosen model — quick background job."""
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "unknown job")
+    with _lock:
+        job.status = "queued"
+        job.stage = "starting"
+        job.error = ""
+    _queue.put((job_id, INPUT_DIR / f"{job_id}.mp3", "",
+                {"vocals_only": True, "vocal_model": req.vocal_model}))
+    return JSONResponse({"job_id": job_id})
 
 
 @app.post("/api/reprocess/{job_id}")

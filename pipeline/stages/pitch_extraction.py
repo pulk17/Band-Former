@@ -255,8 +255,14 @@ def _extract_vocals_crepe(audio_path: Path) -> list[NoteEvent]:
 
     # torchcrepe's recommended cleanup: median-smooth the confidence, gate on
     # actual audio silence, then the 0.21 At-threshold (not a raw 0.5 cut).
+    # The Silence gate internally touches torchaudio and can die with
+    # "TorchCodec is required" on some installs — it's an enhancement, so a
+    # failure must not kill the whole vocals stage.
     periodicity = torchcrepe.filter.median(periodicity, 5)
-    periodicity = torchcrepe.threshold.Silence(-60.)(periodicity, audio, sr, hop_length)
+    try:
+        periodicity = torchcrepe.threshold.Silence(-60.)(periodicity, audio, sr, hop_length)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("Silence gate skipped (%s)", exc)
     pitch = torchcrepe.filter.median(pitch, 3)
 
     pitch = pitch.squeeze().cpu().numpy()
@@ -345,7 +351,10 @@ def _contour_crepe(audio_path: Path) -> list[list]:
         batch_size=512, device=device, return_periodicity=True,
     )
     periodicity = torchcrepe.filter.median(periodicity, 5)
-    periodicity = torchcrepe.threshold.Silence(-60.)(periodicity, audio, sr, hop)
+    try:
+        periodicity = torchcrepe.threshold.Silence(-60.)(periodicity, audio, sr, hop)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("Silence gate skipped (%s)", exc)
     pitch = torchcrepe.filter.median(pitch, 3)
     pitch = pitch.squeeze().cpu().numpy()
     periodicity = periodicity.squeeze().cpu().numpy()
