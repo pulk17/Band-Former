@@ -43,6 +43,10 @@ pytorch_lightning
 # to the pre-refactor 4.40.x line.
 transformers==4.40.2
 
+# Piano-tiles video mode (tiles/extract.py) — keyboard detection and the
+# scan-line note reader. Headless build: no GUI windows are ever opened.
+opencv-python-headless
+
 # Utilities
 numpy
 scipy
@@ -59,3 +63,9 @@ yt-dlp
 
 # Testing
 pytest
+
+# ── Optional ──────────────────────────────────────────────────────────────
+# Piano transcription (ByteDance high-resolution model). Only used when a song
+# is processed with instrument = "piano"; without it that mode falls back to
+# YourMT3, which is noticeably weaker on solo piano.
+#   pip install piano_transcription_inference

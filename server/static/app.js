@@ -101,8 +101,26 @@
   }
 
   // ── Overlay ───────────────────────────────────────────────────────────────
-  const STEP_ORDER = ["starting", "Separating stems", "Tracking beats", "Transcribing notes", "Building tab", "Arranging", "Extracting vocals"];
-  let overlayT0 = 0;
+  // The step list depends on which pipeline is running: tiles videos read notes
+  // from the video and never separate or transcribe. Each entry is
+  // [stage prefix reported by the backend, label].
+  const FLOWS = {
+    audio: [["starting", "Initializing"], ["Separating stems", "Separating stems"], ["Tracking beats", "Tracking beats"],
+            ["Transcribing notes", "Transcribing notes"], ["Building tab", "Building tab"], ["Arranging", "Arranging"],
+            ["Extracting vocals", "Extracting vocals"]],
+    tiles: [["starting", "Initializing"], ["Reading tiles video", "Reading tiles video"], ["Tracking beats", "Tracking beats"],
+            ["Building tab", "Building tab"], ["Arranging", "Arranging"]],
+  };
+  // Stages the backend reports that stand in for a listed step.
+  const STEP_ALIAS = { "Skipping separation": "Separating stems" };
+  let stepFlow = "audio", overlayT0 = 0;
+
+  function setStepFlow(flow) {
+    if (flow === stepFlow && $("progressSteps").children.length) return;
+    stepFlow = flow;
+    $("progressSteps").innerHTML = FLOWS[flow].map(([step, label]) =>
+      `<div class="pStep" data-step="${step}"><span class="stepDot"></span><span class="stepLabel">${label}</span></div>`).join("");
+  }
   function showOverlay(msg, sub, stg) {
     const ov = $("overlay");
     if (ov.classList.contains("hidden")) overlayT0 = Date.now();
@@ -112,11 +130,17 @@
     updateSteps(stg);
   }
   function updateSteps(currentStage) {
+    const stage = STEP_ALIAS[currentStage] || currentStage || "";
+    // "Reading tiles video" is reported only by the tiles pipeline, so it also
+    // covers reprocesses, where the UI never knew the job's kind.
+    if (stage.startsWith("Reading tiles video")) setStepFlow("tiles");
+    else if (["Separating stems", "Transcribing notes", "Extracting vocals"].some((s) => stage.startsWith(s))) setStepFlow("audio");
+    const order = FLOWS[stepFlow].map(([s]) => s);
     // Prefix match: two-stage separation reports "Separating stems (1/2 — …)"
     // etc. — those still light up the "Separating stems" step.
-    const idx = STEP_ORDER.findIndex((s) => currentStage && currentStage.startsWith(s));
+    const idx = order.findIndex((s) => stage.startsWith(s));
     document.querySelectorAll(".pStep").forEach((el) => {
-      const stepIdx = STEP_ORDER.indexOf(el.dataset.step);
+      const stepIdx = order.indexOf(el.dataset.step);
       el.classList.remove("done", "active");
       if (idx < 0) return;
       if (stepIdx < idx) el.classList.add("done");
@@ -247,6 +271,7 @@
   // ── Add: upload / youtube ─────────────────────────────────────────────────
   $("fileInput").addEventListener("change", async (e) => {
     const f = e.target.files[0]; if (!f) return;
+    setStepFlow($("tilesChk").checked ? "tiles" : "audio");
     showOverlay("Uploading…", f.name);
     const fd = new FormData(); fd.append("file", f); fd.append("instrument", $("instSel").value);
     fd.append("run_beats", $("optBeats").checked);
@@ -262,6 +287,7 @@
   });
   $("ytBtn").addEventListener("click", async () => {
     const url = $("ytInput").value.trim(); if (!url) return;
+    setStepFlow($("tilesChk").checked ? "tiles" : "audio");
     showOverlay("Fetching from YouTube…", url);
     const r = await fetch("/api/transcribe/youtube", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
@@ -860,33 +886,68 @@
     const nh = Math.max(3, Math.min(16, (H - padT - padB) / span * 0.8));
     const stepPx = yOf(rlo) - yOf(rlo + 1);
 
+    const KBW = 38;   // fixed keyboard strip along the left edge
     rx.font = "10px system-ui"; rx.textBaseline = "middle";
     for (let p = Math.ceil(rlo); p <= rhi; p++) {
       const isC = ((p % 12) + 12) % 12 === 0;
       const black = [1, 3, 6, 8, 10].includes(((p % 12) + 12) % 12);
       const y = yOf(p);
-      if (black) { rx.fillStyle = "rgba(255,255,255,0.025)"; rx.fillRect(0, y - nh / 2, W, nh); }
-      if (isC) { rx.strokeStyle = "rgba(255,255,255,0.12)"; rx.beginPath(); rx.moveTo(0, y + nh / 2); rx.lineTo(W, y + nh / 2); rx.stroke(); }
-      // Show every note name once there's room for the text; otherwise
-      // just the C octave markers, so it never turns into overlapping mush.
-      if (isC || stepPx >= 10) {
-        rx.fillStyle = isC ? "#bbb" : "#666"; rx.textAlign = "left";
-        rx.fillText(PC_NOTE[(((p % 12) + 12) % 12)] + (Math.floor(p / 12) - 1), 5, y);
-      }
+      if (black) { rx.fillStyle = "rgba(255,255,255,0.025)"; rx.fillRect(KBW, y - nh / 2, W - KBW, nh); }
+      if (isC) { rx.strokeStyle = "rgba(255,255,255,0.12)"; rx.beginPath(); rx.moveTo(KBW, y + nh / 2); rx.lineTo(W, y + nh / 2); rx.stroke(); }
     }
-    if (beats.length) { rx.strokeStyle = "rgba(255,255,255,0.05)"; for (const b of beats) { const x = nowX + (b - t) * PPS; if (x < 0 || x > W) continue; rx.beginPath(); rx.moveTo(x, padT); rx.lineTo(x, H - padB); rx.stroke(); } }
+    if (beats.length) { rx.strokeStyle = "rgba(255,255,255,0.05)"; for (const b of beats) { const x = nowX + (b - t) * PPS; if (x < KBW || x > W) continue; rx.beginPath(); rx.moveTo(x, padT); rx.lineTo(x, H - padB); rx.stroke(); } }
 
+    const sounding = new Set();
+    rx.save(); rx.beginPath(); rx.rect(KBW, 0, W - KBW, H); rx.clip();
     for (let i = Math.max(0, lower(roll, tStart) - 20); i < roll.length; i++) {
       const n = roll[i]; if (n.start > tEnd) break; if (n.start + n.duration < tStart) continue;
       const x = nowX + (n.start - t) * PPS, w = Math.max(6, n.duration * PPS), y = yOf(n.pitch);
       const active = n.start <= t && t <= n.start + n.duration;
-      rx.fillStyle = active ? "#ffffff"
-        : n.hand === "left" ? "rgba(58,167,255,0.85)"
-        : n.hand === "right" ? "rgba(76,201,127,0.85)"
-        : "rgba(255,159,28,0.8)";
+      if (active) sounding.add(n.pitch);
+      rx.fillStyle = active ? "#ffffff" : handColor(n.hand);
       roundRect(rx, x, y - nh / 2, w, nh, 3); rx.fill();
     }
+    rx.restore();
     rx.strokeStyle = NOWLINE; rx.lineWidth = 2; rx.beginPath(); rx.moveTo(nowX, padT); rx.lineTo(nowX, H - padB); rx.stroke(); rx.lineWidth = 1;
+
+    drawRollKeys(KBW, H, rlo, rhi, yOf, nh, stepPx, sounding);
+    drawRollLegend(W);
+  }
+
+  const handColor = (h) => h === "left" ? "rgba(58,167,255,0.85)" : h === "right" ? "rgba(76,201,127,0.85)" : "rgba(255,159,28,0.8)";
+
+  // Fixed piano strip down the left edge: one key per pitch row, lit while the
+  // note is sounding at the now-line, so the roll reads like a keyboard.
+  function drawRollKeys(KBW, H, rlo, rhi, yOf, nh, stepPx, sounding) {
+    rx.fillStyle = "#0b0d10"; rx.fillRect(0, 0, KBW, H);
+    rx.font = "9px system-ui"; rx.textBaseline = "middle"; rx.textAlign = "left";
+    for (let p = Math.ceil(rlo); p <= rhi; p++) {
+      const pc = ((p % 12) + 12) % 12, black = [1, 3, 6, 8, 10].includes(pc), isC = pc === 0;
+      const y = yOf(p), lit = sounding.has(p);
+      const kw = black ? KBW * 0.62 : KBW;
+      rx.fillStyle = lit ? "#ffd166" : black ? "#181c22" : "#e8e8ea";
+      rx.fillRect(0, y - nh / 2 + 0.5, kw, Math.max(1, nh - 1));
+      if (!black) { rx.strokeStyle = "rgba(0,0,0,0.35)"; rx.beginPath(); rx.moveTo(0, y + nh / 2); rx.lineTo(kw, y + nh / 2); rx.stroke(); }
+      // Label only when the row is tall enough to hold text — C octaves always,
+      // so you never lose your place in the register.
+      if (isC || stepPx >= 11) {
+        rx.fillStyle = black ? "#8a8f98" : "#33363c";
+        rx.fillText(PC_NOTE[pc] + (Math.floor(p / 12) - 1), black ? kw + 2 : 3, y);
+      }
+    }
+    rx.strokeStyle = "rgba(255,255,255,0.15)"; rx.beginPath(); rx.moveTo(KBW + 0.5, 0); rx.lineTo(KBW + 0.5, H); rx.stroke();
+  }
+
+  function drawRollLegend(W) {
+    const items = [["left", "left hand"], ["right", "right hand"], ["", "unassigned"]];
+    rx.font = "10px system-ui"; rx.textBaseline = "middle"; rx.textAlign = "left";
+    let x = W - 8;
+    for (const [hand, label] of items.slice().reverse()) {
+      const tw = rx.measureText(label).width;
+      x -= tw; rx.fillStyle = "#8a8f98"; rx.fillText(label, x, 10);
+      x -= 14; rx.fillStyle = handColor(hand); roundRect(rx, x, 6, 9, 8, 2); rx.fill();
+      x -= 10;
+    }
   }
 
   let lastName = "";

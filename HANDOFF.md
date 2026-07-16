@@ -362,8 +362,11 @@ lead-vocal karaoke separation model; per-song tuning.json overrides; Electron pa
    −30 cents), darkhaast (G# major-ish acoustic), one tiles video (exact ground truth!).
    Tiles songs are your only PERFECT ground truth — use them to measure the audio
    pipeline: process the same song via tiles AND via audio ("piano" instrument), then
-   diff notes (onset ±80 ms, pitch exact) → recall/precision numbers. Automate as
-   `tools/eval.py` if you touch note extraction.
+   diff notes (onset ±80 ms, pitch exact) → recall/precision numbers. `tools/eval.py`
+   does exactly this — run it before and after every knob change:
+   `python tools/eval.py data/output/TILES_SONG data/output/AUDIO_SONG --chords`
+   (it reads notes.json / tab.json["roll"], never the arranged notes; searches a global
+   time offset; `--ignore-octave` isolates octave errors from real misses).
 2. One knob per experiment; fast loop (Section 0 commands), ~10 s per song.
 3. A change ships only if it improves/holds BOTH reference songs.
 4. Chord truth sources: any published chord chart; compare at beat resolution, roots

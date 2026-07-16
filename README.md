@@ -19,6 +19,33 @@ independently.
 
 ---
 
+## Quickstart
+
+```bash
+python -m venv .venv                       # Python 3.12; FFmpeg must be on PATH
+.venv/Scripts/python -m pip install torch torchaudio torchvision \
+    --index-url https://download.pytorch.org/whl/cu128    # cu128 = RTX 50-series
+.venv/Scripts/python -m pip install -r requirements.txt -c constraints.txt
+cmake --preset vcpkg && cmake --build build   # in tab_engine/ — see section 1
+start.bat                                  # or: python -m uvicorn server.app:app --port 8000
+```
+
+Run the server **from the repo root** — the C++ engine reads `tuning.json` from
+the working directory. Then open http://127.0.0.1:8000, paste a YouTube link or
+upload a file, and pick the instrument. Tick **Piano-tiles video** for
+Synthesia-style falling-tile videos: the notes are read from the video itself
+instead of transcribed from audio, which is near-exact.
+
+Accuracy is adjustable from the **Tune** button — every detection knob
+(`tuning.json`) with a plain-language hint, plus "Save & reprocess song" to hear
+the change. Nothing needs a restart.
+
+Further reading: [HANDOFF.md](HANDOFF.md) (how to finish/extend it — read the
+golden rules first), [OVERHAUL.md](OVERHAUL.md) (audio-pipeline design notes),
+[PIANO_TILES_PLAN.md](PIANO_TILES_PLAN.md) (tiles mode + the knob table).
+
+---
+
 ## Platform support
 
 Band-Former runs on **Linux, Windows, and macOS**. The C++ engine uses
