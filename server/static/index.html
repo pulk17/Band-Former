@@ -126,6 +126,19 @@
           <option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option>
         </select>
       </label>
+      <label class="ctl" title="Play the transcription back on a synthesised instrument — the fastest way to judge whether it got the song right">Hear
+        <select id="soundSel">
+          <option value="original">Original</option>
+          <option value="both">Both</option>
+          <option value="instrument">Transcription</option>
+        </select>
+      </label>
+      <label class="ctl">as
+        <select id="synthSel" title="Guitar is a plucked-string model; piano is an inharmonic struck-string model. For a piano-tiles song the piano plays the notes read off the video.">
+          <option value="guitar">Guitar</option>
+          <option value="piano">Piano</option>
+        </select>
+      </label>
       <label class="ctl">Capo<select id="capoSel"></select></label>
       <button id="loopBtn" title="Set A then B to loop">Loop</button>
       <button id="metroBtn" title="Metronome">Metro</button>
@@ -188,6 +201,7 @@
   </div>
 </div>
 
+<script src="/static/synth.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

@@ -292,8 +292,26 @@ def extract_notes(video_path: str | Path, stride: int = 1, progress=None) -> dic
                 t += 1
     notes.sort(key=lambda n: n["start_time"])
 
-    # hand assignment: 2-means on hue (tiles mode colors hands differently)
-    hv = np.array([n["hue"] for n in notes if n["hue"] >= 0], dtype=np.float32)
+    hand_method = assign_hands(notes)
+    for n in notes:
+        n.pop("hue", None)
+
+    return {"notes": notes, "keyboard": kb, "fps": fps,
+            "hands": hand_method,
+            "mode": "tiles+highlight" if (tiles_mode and hl_mode)
+                    else ("tiles" if tiles_mode else "highlight")}
+
+
+def assign_hands(notes: list[dict]) -> str:
+    """Label each note left/right. Returns which method actually worked.
+
+    Colour first: Synthesia tints the two hands differently, so 2-means on the
+    tile hue is near-exact when it's available. But it often isn't — notes found
+    through the key-highlight path never see a tile, and plenty of videos use
+    one colour for everything. That used to leave every note unlabelled with no
+    indication why, so fall back to splitting by pitch.
+    """
+    hv = np.array([n["hue"] for n in notes if n.get("hue", -1) >= 0], dtype=np.float32)
     if len(hv) > 10 and float(hv.std()) > 8:
         c1, c2 = float(hv.min()), float(hv.max())
         for _ in range(12):
@@ -302,14 +320,33 @@ def extract_notes(video_path: str | Path, stride: int = 1, progress=None) -> dic
             c1, c2 = (float(a1.mean()) if len(a1) else c1,
                       float(a2.mean()) if len(a2) else c2)
         for n in notes:
-            if n["hue"] >= 0:
-                n["hand"] = "left" if abs(n["hue"] - min(c1, c2)) < abs(n["hue"] - max(c1, c2)) else "right"
-    for n in notes:
-        n.pop("hue", None)
+            if n.get("hue", -1) >= 0:
+                n["hand"] = ("left" if abs(n["hue"] - min(c1, c2)) < abs(n["hue"] - max(c1, c2))
+                             else "right")
 
-    return {"notes": notes, "keyboard": kb, "fps": fps,
-            "mode": "tiles+highlight" if (tiles_mode and hl_mode)
-                    else ("tiles" if tiles_mode else "highlight")}
+    labelled = sum(1 for n in notes if n.get("hand"))
+    if labelled >= 0.6 * len(notes):
+        return "colour" if labelled == len(notes) else "colour (partial)"
+
+    # Pitch fallback. Hands rarely cross, and in a two-hand texture there's a
+    # gap in the middle of the register at any given moment — split there.
+    # Where there's no gap the passage is probably one hand, so fall back to the
+    # local median rather than inventing a division.
+    starts = np.array([n["start_time"] for n in notes])
+    pitches = np.array([n["pitch"] for n in notes], dtype=float)
+    win = 2.0
+    for i, n in enumerate(notes):
+        lo = int(np.searchsorted(starts, starts[i] - win))
+        hi = int(np.searchsorted(starts, starts[i] + win))
+        near = np.unique(pitches[lo:hi])
+        if len(near) >= 4:
+            gaps = np.diff(near)
+            j = int(np.argmax(gaps))
+            split = (near[j] + near[j + 1]) / 2 if gaps[j] >= 5 else float(np.median(near))
+        else:
+            split = float(np.median(pitches))
+        n["hand"] = "left" if n["pitch"] < split else "right"
+    return "pitch (heuristic)"
 
 
 def validate_octave(notes: list[dict], audio_path: str | Path) -> int:
@@ -368,7 +405,8 @@ def write_outputs(result: dict, out_dir: str | Path) -> Path:
         indent=2))
     (out_dir / "tiles_meta.json").write_text(json.dumps(
         {"mode": result["mode"], "fps": result["fps"], "keyboard": result["keyboard"],
-         "hands": sum(1 for n in notes if "hand" in n)}, indent=2))
+         "hand_method": result.get("hands", "none"),
+         "hands": sum(1 for n in notes if n.get("hand"))}, indent=2))
     try:
         import mido
         mid = mido.MidiFile(); tr = mido.MidiTrack(); mid.tracks.append(tr)

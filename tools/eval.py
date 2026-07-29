@@ -12,6 +12,12 @@ Usage:
     python tools/eval.py TRUTH TEST --chords             # chord timeline too
     python tools/eval.py TRUTH TEST --no-align           # skip offset search
 
+Ground truth from a published MIDI (the definitive check for a tiles video —
+most Synthesia videos are rendered from a MIDI that's published with them):
+
+    python tools/eval.py truth.mid data/output/SONG
+    python tools/eval.py truth.mid data/output/SONG --ignore-octave
+
 For chords on a song you know by ear (no tiles version needed), write the
 detection out as a chart, fix the wrong lines, and score against it forever:
 
@@ -45,6 +51,26 @@ def _load_json(path: Path):
         return json.load(fh)
 
 
+def load_midi(path: str) -> list[dict]:
+    """Notes from a MIDI file — the real ground truth for a tiles video.
+
+    Most Synthesia-style videos are rendered FROM a MIDI, and those MIDIs are
+    usually published alongside the video. Grab that file and this scores the
+    extraction against what the video was actually made from. Drums (channel 10)
+    are skipped; they aren't pitched.
+    """
+    import pretty_midi
+    pm = pretty_midi.PrettyMIDI(path)
+    notes = []
+    for inst in pm.instruments:
+        if inst.is_drum:
+            continue
+        for n in inst.notes:
+            notes.append({"start": float(n.start), "pitch": int(n.pitch)})
+    notes.sort(key=lambda n: n["start"])
+    return notes
+
+
 def load_notes(target: str) -> tuple[list[dict], str]:
     """Return [{start, pitch}] from a song folder / notes.json / tab.json.
 
@@ -55,6 +81,8 @@ def load_notes(target: str) -> tuple[list[dict], str]:
     tab.json explicitly if that's what you actually want.
     """
     p = Path(target)
+    if p.suffix.lower() in (".mid", ".midi"):
+        return load_midi(target), f"{p} (MIDI)"
     if p.is_dir():
         tabp = p / "tab.json"
         if tabp.exists() and _load_json(tabp).get("roll"):
@@ -118,8 +146,12 @@ def best_offset(truth, test, tol, ignore_octave) -> float:
     def pick(offsets, tolerance):
         return max(offsets, key=lambda o: (match(truth, test, tolerance, ignore_octave, o), -abs(o)))
 
-    coarse = pick([k * 0.05 for k in range(-40, 41)], tol)
-    return pick([round(coarse + k * 0.01, 3) for k in range(-5, 6)], tol)
+    # Wide first pass: a published MIDI starts at bar 1 while the video has an
+    # intro, so the two can be many seconds apart — a ±2 s search silently
+    # reports 0% for a perfectly good extraction.
+    coarse = pick([round(k * 0.1, 2) for k in range(-100, 101)], max(tol, 0.12))
+    mid = pick([round(coarse + k * 0.02, 3) for k in range(-5, 6)], tol)
+    return pick([round(mid + k * 0.005, 4) for k in range(-4, 5)], tol)
 
 
 def chords_of(target: str) -> list[dict]:

@@ -75,22 +75,46 @@
   let playing = false, t0ctx = 0, t0song = 0, paused = 0, rate = 1, dirty = true;
   let loopA = null, loopB = null, metro = false, metroIdx = 0;
 
-  const ctx = () => (actx || (actx = new (window.AudioContext || window.webkitAudioContext)()));
+  // Playback of the TRANSCRIPTION itself (see synth.js) — the point is to hear
+  // what the app thinks the song is, next to the song, and judge it.
+  let songGain = null, synthGain = null, synthIdx = 0, synthReady = "";
+  let sound = "original", synthInst = "guitar";
+
+  const ctx = () => {
+    if (!actx) {
+      actx = new (window.AudioContext || window.webkitAudioContext)();
+      // A compressor on the way out: a dense strum is a dozen notes at once and
+      // would otherwise clip hard.
+      const comp = actx.createDynamicsCompressor();
+      comp.threshold.value = -12; comp.ratio.value = 4; comp.attack.value = 0.004;
+      comp.connect(actx.destination);
+      songGain = actx.createGain(); songGain.connect(comp);
+      synthGain = actx.createGain(); synthGain.connect(comp);
+      applySound();
+    }
+    return actx;
+  };
+  function applySound() {
+    if (!songGain) return;
+    songGain.gain.value = sound === "instrument" ? 0 : 1;
+    synthGain.gain.value = sound === "original" ? 0 : (sound === "instrument" ? 0.9 : 0.65);
+  }
   const songTime = () => playing ? t0song + (ctx().currentTime - t0ctx) * rate : paused;
   function stopSrc() { if (src) { try { src.onended = null; src.stop(); } catch (e) {} src = null; } }
   function play(off) {
     ctx(); if (actx.state === "suspended") actx.resume();
     if (!buffer) return;
-    stopSrc();
+    stopSrc(); stopVoices();
     off = Math.max(0, Math.min(off, duration));
     src = actx.createBufferSource(); src.buffer = buffer; src.playbackRate.value = rate;
-    src.connect(actx.destination);
+    src.connect(songGain);
     src.onended = () => { if (playing && songTime() >= duration - 0.06) { pause(); paused = 0; } };
     src.start(0, off);
     t0ctx = actx.currentTime; t0song = off; playing = true; metroIdx = 0;
+    synthIdx = lower(synthNotes(), off);
     $("playBtn").innerHTML = PAUSE_ICON;
   }
-  function pause() { if (!playing) return; paused = songTime(); playing = false; stopSrc(); $("playBtn").innerHTML = PLAY_ICON; dirty = true; }
+  function pause() { if (!playing) return; paused = songTime(); playing = false; stopSrc(); stopVoices(); $("playBtn").innerHTML = PLAY_ICON; dirty = true; }
   const toggle = () => { if (buffer) (playing ? pause() : play(paused)); };
   const seekTo = (t) => { t = Math.max(0, Math.min(t, duration)); if (playing) play(t); else { paused = t; dirty = true; } };
   function click(when) {
@@ -98,6 +122,61 @@
     o.frequency.value = 1500; o.connect(g); g.connect(actx.destination);
     g.gain.setValueAtTime(0.0001, when); g.gain.exponentialRampToValueAtTime(0.5, when + 0.001);
     g.gain.exponentialRampToValueAtTime(0.0001, when + 0.05); o.start(when); o.stop(when + 0.06);
+  }
+
+  // ── Playing the transcription ─────────────────────────────────────────────
+  // Which notes get sounded: for a tiles song on piano, the raw notes read off
+  // the video (that's what you'd want to check); otherwise whatever the
+  // Lead/Rhythm/Both switch is showing, so what you hear matches what you see.
+  function synthNotes() {
+    if (synthInst === "piano" && roll.length) return roll;
+    return content === "melody" ? melodyNotes : content === "chords" ? harmonyNotes : allNotes;
+  }
+
+  let voices = [];
+  function stopVoices() {
+    for (const v of voices) { try { v.stop(); } catch (e) {} }
+    voices = [];
+  }
+  function playNote(n, when) {
+    const lead = n.voice === "lead" || n.melody || n.hand === "right";
+    const buf = window.BFSynth.noteBuffer(actx, synthInst, n.pitch, lead ? 0.85 : 0.62);
+    const s = actx.createBufferSource(); s.buffer = buf;
+    const g = actx.createGain();
+    s.connect(g); g.connect(synthGain);
+    // Ring for the note's own length, then release. Playing at half speed must
+    // hold notes twice as long in real time, but must NOT retune them — hence
+    // playbackRate stays 1 and only the envelope stretches.
+    const dur = Math.max(0.09, (n.duration || 0.35) / rate);
+    g.gain.setValueAtTime(1, when + dur);
+    g.gain.exponentialRampToValueAtTime(0.0008, when + dur + 0.25);
+    s.start(when); s.stop(when + dur + 0.3);
+    s.onended = () => { voices = voices.filter((v) => v !== s); };
+    voices.push(s);
+  }
+  function scheduleSynth(t) {
+    if (!synthGain || sound === "original" || !playing || !window.BFSynth) return;
+    const list = synthNotes(), LOOKAHEAD = 0.4;
+    while (synthIdx < list.length) {
+      const n = list[synthIdx];
+      if (n.start > t + LOOKAHEAD) break;
+      // Map song time to context time through the transport's own anchor, so
+      // the notes stay locked to the audio however often the frame rate dips.
+      const when = t0ctx + (n.start - t0song) / rate;
+      if (when > actx.currentTime + 0.005 && n.pitch) playNote(n, when);
+      synthIdx++;
+    }
+  }
+  async function prepareSynth() {
+    if (!window.BFSynth || sound === "original") return;
+    const key = synthInst + ":" + (tab ? tab.metadata.title || curJob : "");
+    if (key === synthReady) return;
+    const pitches = synthNotes().map((n) => n.pitch).filter(Boolean);
+    if (!pitches.length) return;
+    $("status").textContent = "Preparing " + synthInst + " sound…";
+    await window.BFSynth.prepare(ctx(), synthInst, pitches);
+    synthReady = key;
+    $("status").textContent = "";
   }
 
   // ── Overlay ───────────────────────────────────────────────────────────────
@@ -223,6 +302,12 @@
     $("viewSeg").querySelector('[data-view=vocals]').style.display = (vocals.length || vpitch.length) ? "" : "none";
     roll = (tab.roll || []).slice().sort((a, b) => a.start - b.start);
     $("viewSeg").querySelector('[data-view=roll]').style.display = roll.length ? "" : "none";
+    // A piano-tiles or piano song should sound like a piano by default.
+    const inst = (tab.metadata || {}).instrument;
+    synthInst = (roll.length || inst === "piano" || inst === "tiles") ? "piano" : "guitar";
+    $("synthSel").value = synthInst;
+    synthReady = ""; stopVoices();
+    prepareSynth();
 
     const m = tab.metadata || {};
     const last = allNotes.length ? allNotes[allNotes.length - 1] : null;
@@ -964,6 +1049,7 @@
     const lat = (actx && playing) ? (actx.outputLatency || actx.baseLatency || 0) * rate : 0;
     const t = songTime() - lat;
     if (playing && loopA != null && loopB != null && t >= loopB) seekTo(loopA);
+    scheduleSynth(t);
     if (playing && metro && beats.length) {
       const ahead = ctx().currentTime;
       while (metroIdx < beats.length) { const bt = beats[metroIdx]; if (bt < t - 0.05) { metroIdx++; continue; } if (bt < t + 0.2) { click(ahead + (bt - t) / rate); metroIdx++; } else break; }
@@ -1002,6 +1088,18 @@
     dirty = true;
   };
   $("metroBtn").onclick = () => { metro = !metro; $("metroBtn").classList.toggle("on", metro); };
+
+  $("soundSel").onchange = async (e) => {
+    sound = e.target.value; ctx(); applySound();
+    if (sound === "original") stopVoices();
+    await prepareSynth();
+    if (playing) synthIdx = lower(synthNotes(), songTime());   // don't re-fire what already passed
+  };
+  $("synthSel").onchange = async (e) => {
+    synthInst = e.target.value; stopVoices();
+    await prepareSynth();
+    if (playing) synthIdx = lower(synthNotes(), songTime());
+  };
   $("barsBtn").onclick = () => {
     barMode = !barMode;
     $("barsBtn").classList.toggle("on", barMode);

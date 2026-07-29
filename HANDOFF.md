@@ -274,6 +274,18 @@ locate the video: `INPUT_DIR.parent / "video"` glob `{stem}.*` (mp4/webm/mkv). Q
 **Avoid**: don't route tiles reprocess through `retranscribe`/stem logic — it's a
 separate branch entirely.
 
+### T3.5 Measuring the tiles extraction
+`tools/tiles_audit.py data/output/SONG` scores an extraction against the video's own
+audio — no external truth needed. Timing is the trustworthy part (cross-correlating the
+note onsets against the audio onset envelope gives a sharp peak); pitch is NOT, because
+with the pedal down a real note often isn't a local spectral peak and ±12/±24 shifts land
+on harmonics with genuine energy. Measured on the beginner video: **+11.6 ms onset bias,
+11.4 ms jitter** (peak 4.7σ) — timing is effectively correct, so don't "fix" it.
+
+For a definitive pitch answer use a published MIDI — most Synthesia videos are rendered
+from one: `python tools/eval.py truth.mid data/output/SONG` (the offset search covers
+±10 s so a video intro can't make a good extraction read as 0%).
+
 ### T4. Validate tiles on the advanced + artifact videos
 `https://youtu.be/Kkd7grCASvw` (dense), `https://youtu.be/pNG-B8DjP7U` (particle
 artifacts at the hit line).
