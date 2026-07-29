@@ -1,4 +1,5 @@
 import logging
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -7,10 +8,11 @@ from audio_separator.separator import Separator
 
 from pipeline.config import (
     DEVICE,
+    INSTRUMENT_SPLIT_MODELS,
     MODEL_CACHE_DIR,
     NORMALIZATION_THRESHOLD,
     OUTPUT_DIR,
-    SEPARATION_MODEL,
+    SEPARATION_PROFILES,
     SEPARATION_QUALITY,
     SUPPORTED_AUDIO_EXTENSIONS,
     VOCAL_SPLIT_MODEL,
@@ -55,6 +57,97 @@ def _get_separator(model_filename: str, stem_output_dir: Path):
     return sep
 
 
+def release_models(keep: str | None = None) -> None:
+    """Drop cached separators (and their VRAM). `keep` spares one model file."""
+    for key in [k for k in _separators if k != keep]:
+        _separators.pop(key, None)
+    try:
+        import gc
+
+        import torch
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _is_oom(exc: Exception) -> bool:
+    return "out of memory" in str(exc).lower() or type(exc).__name__ == "OutOfMemoryError"
+
+
+def _separate_with_retry(model_file: str, stem_output_dir: Path, source: Path, custom: dict):
+    """Run one separation pass, retrying once after freeing the other cached
+    models. Three models warm at a time (two separators + the transcriber) is
+    enough to OOM a smaller card, and reloading takes seconds against a job
+    that takes minutes."""
+    sep = _get_separator(model_file, stem_output_dir)
+    try:
+        return sep.separate(str(source), custom_output_names=custom)
+    except Exception as exc:  # noqa: BLE001
+        if not _is_oom(exc):
+            raise
+        logger.warning("Out of memory during separation — freeing other models and retrying once.")
+        release_models(keep=model_file)
+        sep = _get_separator(model_file, stem_output_dir)
+        return sep.separate(str(source), custom_output_names=custom)
+
+
+# Stem keywords in the order we prefer to recognise them, matched against the
+# LAST parenthesised group of a filename.
+_STEM_KEYS = ("vocals", "vocal", "drums", "bass", "guitar", "piano", "other", "instrumental")
+_CANON = {"vocal": "Vocals", "vocals": "Vocals", "drums": "Drums", "bass": "Bass",
+          "guitar": "Guitar", "piano": "Piano", "other": "Other", "instrumental": "Instrumental"}
+
+
+def _stem_kind(filename: str) -> str | None:
+    """Which source a separator wrote, read from the last `(...)` group.
+
+    Reading the LAST group matters: in two-stage mode the input file is already
+    called `..._(Instrumental)_roformer.wav`, so a naive substring search would
+    label every stage-B stem "instrumental"."""
+    groups = re.findall(r"\(([^)]+)\)", filename) or [Path(filename).stem]
+    for group in reversed(groups):
+        low = group.lower()
+        for key in _STEM_KEYS:
+            if key in low:
+                return _CANON[key]
+    return None
+
+
+def _canonicalize_stems(stem_output_dir: Path, name: str, tag: str,
+                        two_stage: bool, before: set[Path]) -> None:
+    """Rename this run's outputs to `{name}_(Stem)_{tag}.wav`.
+
+    `custom_output_names` only works when its keys match the model's internal
+    stem labels exactly, and those differ per model (and aren't published for
+    some, e.g. BS-Roformer-SW ships no stem list). Rather than guess, we let the
+    model name files however it likes and fix them afterwards — so swapping in a
+    new separation model can't break the glob contracts the rest of the
+    pipeline depends on."""
+    for path in sorted(stem_output_dir.glob("*.wav")):
+        if path in before:
+            continue
+        kind = _stem_kind(path.name)
+        if kind is None:
+            logger.warning("Unrecognised separator output (left as-is): %s", path.name)
+            continue
+        # In two-stage mode the input had no vocals left, so whatever the model
+        # calls "vocals" is residue — name it so the vocal globs skip it.
+        if kind == "Vocals" and two_stage:
+            kind = "Residual"
+        target = stem_output_dir / f"{name}_({kind})_{tag}.wav"
+        if path == target:
+            continue
+        try:
+            if target.exists():
+                target.unlink()
+            path.rename(target)
+            logger.info("Normalised stem name: %s -> %s", path.name, target.name)
+        except OSError as exc:
+            logger.warning("Could not rename %s (%s)", path.name, exc)
+
+
 def _build_combined_stem(stem_output_dir: Path, stems: list[Path]) -> Path | None:
     """Sum the pitched instrument stems (guitar+bass+piano+other) into one mono WAV."""
     import numpy as np
@@ -75,7 +168,9 @@ def _build_combined_stem(stem_output_dir: Path, stems: list[Path]) -> Path | Non
     peak = float(np.max(np.abs(mix))) or 1.0
     if peak > 1.0:
         mix = mix / peak
-    out = stem_output_dir / f"{stem_output_dir.name}_(Combined)_htdemucs_6s.wav"
+    # Model-agnostic name: which separator produced the parts doesn't matter,
+    # and hard-coding one model's tag here made the file lie once we could swap.
+    out = stem_output_dir / f"{stem_output_dir.name}_(Combined).wav"
     sf.write(str(out), mix, sr)
     return out
 
@@ -96,20 +191,28 @@ def separate_guitar(audio_path: str | Path, instrument: str = "guitar",
                     quality: str | None = None, on_stage=None) -> SeparationResult:
     """Separate a stem from a full mix and return it for transcription.
 
-    quality="best" (default): two-stage — BS-Roformer first (SOTA vocals +
-    clean instrumental), then htdemucs_6s splits the *instrumental* into
-    guitar/bass/piano/drums/other. Vocals come from the Roformer (far cleaner
-    for pitch tracking) and the guitar stem has no vocal bleed. This is why the
-    UI shows "separating stems" twice in a row — it's not a bug, it's two real
-    neural-net passes; on_stage lets the caller label them distinctly instead
-    of leaving the user staring at the same message twice.
+    Two stages, selected by `quality` (see SEPARATION_PROFILES):
 
-    quality="fast": single htdemucs_6s pass on the original mix (old behavior).
+      fast   one htdemucs_6s pass on the raw mix.
+      best   BS-Roformer vocal split, then htdemucs_6s on the instrumental.
+      ultra  BS-Roformer vocal split, then BS-Roformer-SW on the instrumental —
+             same six sources as htdemucs but cleaner guitar/piano, at the cost
+             of speed and a bigger first-run download.
+
+    Splitting vocals off first means the instrument stems carry no vocal bleed
+    and the vocals themselves come from a model built for them (much better for
+    pitch tracking). That's why the UI reports "separating stems" twice — two
+    real neural-net passes, labelled 1/2 and 2/2 through `on_stage`.
 
     `instrument` selects which stem to transcribe; "all" builds one combined
     instrumental stem (so overlapping notes are quantified once, not per stem)."""
     audio_path = Path(audio_path)
     quality = quality or SEPARATION_QUALITY
+    profile = SEPARATION_PROFILES.get(quality)
+    if profile is None:
+        logger.warning("Unknown separation quality %r — using 'best'.", quality)
+        profile = SEPARATION_PROFILES["best"]
+    split_model, split_tag = INSTRUMENT_SPLIT_MODELS[profile["instrument_model"]]
 
     def report(stage: str):
         if on_stage:
@@ -128,56 +231,60 @@ def separate_guitar(audio_path: str | Path, instrument: str = "guitar",
     stem_output_dir.mkdir(parents=True, exist_ok=True)
     name = audio_path.stem
 
-    logger.info("Starting separation for '%s' (quality=%s)", audio_path.name, quality)
+    logger.info("Starting separation for '%s' (quality=%s, split=%s)",
+                audio_path.name, quality, profile["instrument_model"])
     logger.info("  Output: %s | Device: %s", stem_output_dir, DEVICE)
 
     start_time = time.time()
     output_files = []
 
-    # ── Stage A (best): vocals / instrumental via BS-Roformer ────────────────
-    demucs_input = audio_path
-    if quality == "best":
+    # ── Stage A: vocals / instrumental via BS-Roformer ───────────────────────
+    split_input = audio_path
+    if profile["vocal_split"]:
         try:
             report("Separating stems (1/2 — vocal split)")
-            sep_a = _get_separator(VOCAL_SPLIT_MODEL, stem_output_dir)
             logger.info("Stage A: BS-Roformer vocal split...")
-            sep_a.separate(str(audio_path), custom_output_names={
+            before = set(stem_output_dir.glob("*.wav"))
+            _separate_with_retry(VOCAL_SPLIT_MODEL, stem_output_dir, audio_path, {
                 "Vocals":       f"{name}_(Vocals)_roformer",
                 "Instrumental": f"{name}_(Instrumental)_roformer",
             })
+            _canonicalize_stems(stem_output_dir, name, "roformer", False, before)
             inst = stem_output_dir / f"{name}_(Instrumental)_roformer.wav"
             if inst.exists():
-                demucs_input = inst
+                split_input = inst
             else:
                 logger.warning("Roformer instrumental not found; falling back to single-stage.")
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Stage A failed (%s); falling back to single-stage htdemucs.", exc)
-            demucs_input = audio_path
+            logger.warning("Stage A failed (%s); falling back to single-stage split.", exc)
+            split_input = audio_path
 
-    # ── Stage B: htdemucs_6s six-stem split ──────────────────────────────────
-    report("Separating stems (2/2 — instrument split)" if quality == "best"
+    # ── Stage B: six-stem instrument split ───────────────────────────────────
+    report("Separating stems (2/2 — instrument split)" if profile["vocal_split"]
            else "Separating stems")
-    separator = _get_separator(f"{SEPARATION_MODEL}.yaml", stem_output_dir)
-    logger.info("Running HTDemucs separation on '%s'...", demucs_input.name)
-    two_stage = demucs_input != audio_path
+    logger.info("Running %s separation on '%s'...", split_model, split_input.name)
+    two_stage = split_input != audio_path
     custom = {
-        "Guitar": f"{name}_(Guitar)_htdemucs_6s",
-        "Bass":   f"{name}_(Bass)_htdemucs_6s",
-        "Piano":  f"{name}_(Piano)_htdemucs_6s",
-        "Other":  f"{name}_(Other)_htdemucs_6s",
-        "Drums":  f"{name}_(Drums)_htdemucs_6s",
+        "Guitar": f"{name}_(Guitar)_{split_tag}",
+        "Bass":   f"{name}_(Bass)_{split_tag}",
+        "Piano":  f"{name}_(Piano)_{split_tag}",
+        "Other":  f"{name}_(Other)_{split_tag}",
+        "Drums":  f"{name}_(Drums)_{split_tag}",
         # In two-stage mode the instrumental has no vocals left — name the
         # residue so vocal globs can't pick it up over the Roformer vocals.
-        "Vocals": f"{name}_(Residual)_htdemucs_6s" if two_stage
-                  else f"{name}_(Vocals)_htdemucs_6s",
+        "Vocals": f"{name}_({'Residual' if two_stage else 'Vocals'})_{split_tag}",
     }
+    before_b = set(stem_output_dir.glob("*.wav"))
     try:
-        output_files = separator.separate(str(demucs_input), custom_output_names=custom)
+        output_files = _separate_with_retry(split_model, stem_output_dir, split_input, custom)
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(
-            f"Source separation failed on '{audio_path.name}': {exc}. "
+            f"Source separation failed on '{audio_path.name}' with {split_model}: {exc}. "
             f"Is the file a valid, decodable audio file?"
         ) from exc
+    # Models that ignore custom_output_names (or use different stem labels)
+    # still end up with the filenames the rest of the pipeline globs for.
+    _canonicalize_stems(stem_output_dir, name, split_tag, two_stage, before_b)
 
     elapsed = time.time() - start_time
     logger.info("Separation completed in %.1f seconds", elapsed)

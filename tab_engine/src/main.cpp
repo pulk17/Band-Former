@@ -242,7 +242,7 @@ int main(int argc, char* argv[]){
         const std::string chord_wav  = (argc >= 5) ? argv[4] : wav_path;
 
         json tune = load_tuning();
-        double q_mult = 1.8, inhibition = 0.30;
+        double q_mult = 1.8, inhibition = 0.40;
         knob(tune, "chroma", "q_mult", q_mult);
         knob(tune, "chroma", "lateral_inhibition", inhibition);
 

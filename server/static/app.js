@@ -1079,6 +1079,35 @@
     setTimeout(tick, 2500);
   };
 
+  // Processing options are per-browser preferences, so remember them — picking
+  // "Ultra" and finding it silently back on "Best" after a reload made every
+  // later comparison meaningless.
+  const OPT_IDS = ["optSep", "optBeats", "optVocals", "optVocalModel", "optInst"];
+  function loadOptions() {
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem("bf_options") || "{}"); } catch (e) {}
+    for (const id of OPT_IDS) {
+      const el = $(id); if (!el || !(id in saved)) continue;
+      if (el.type === "checkbox") el.checked = !!saved[id];
+      else if ([...el.options].some((o) => o.value === saved[id])) el.value = saved[id];
+    }
+    sepHint();
+  }
+  function saveOptions() {
+    const o = {};
+    for (const id of OPT_IDS) { const el = $(id); if (el) o[id] = el.type === "checkbox" ? el.checked : el.value; }
+    try { localStorage.setItem("bf_options", JSON.stringify(o)); } catch (e) {}
+  }
+  function sepHint() {
+    const v = $("optSep").value;
+    $("sepHint").textContent = v === "ultra"
+      ? "First run downloads the Roformer-SW model (~1 GB) and separation takes noticeably longer. Best guitar/piano stems."
+      : v === "fast" ? "One pass, no vocal pre-split — quickest, and the stems carry the most bleed."
+      : "Two passes: clean vocals for pitch tracking, no vocal bleed in the instrument stems.";
+  }
+  for (const id of OPT_IDS) { const el = $(id); if (el) el.addEventListener("change", () => { saveOptions(); sepHint(); }); }
+  loadOptions();
+
   // ── Tuning panel: every pipeline knob, editable in-app ────────────────────
   const TUNING_SECTIONS = {
     chord:   "Chords",

@@ -3,7 +3,7 @@
 
   "chroma": {
     "q_mult": 1.8,
-    "lateral_inhibition": 0.30
+    "lateral_inhibition": 0.40
   },
 
   "chord": {
@@ -13,10 +13,10 @@
     "bass_bonus": 0.8,
     "no_chord_floor": -0.5,
     "key_penalty": 0.03,
-    "thirdless_penalty": 0.05,
+    "thirdless_penalty": 0.20,
     "slash_bass_mass": 0.35,
     "key_window_segs": 16,
-    "gate_tau": 0.09,
+    "gate_tau": 0.18,
     "miss_weight": 0.6,
     "absent_weight": 1.5,
     "absent_tau": 0.08

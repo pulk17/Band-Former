@@ -413,12 +413,12 @@ def reprocess_job(job_id: str, req: ReprocessRequest) -> JSONResponse:
 # Factory defaults double as the editor's schema: sections, keys, and reset
 # values. tuning.json overrides these; the pipeline re-reads it per run.
 TUNING_FACTORY = {
-    "chroma": {"q_mult": 1.8, "lateral_inhibition": 0.30},
+    "chroma": {"q_mult": 1.8, "lateral_inhibition": 0.40},
     "chord": {
         "silence_threshold": 0.02, "transition_penalty": 0.15,
         "complexity_penalty": 0.15, "bass_bonus": 0.8, "no_chord_floor": -0.5,
-        "key_penalty": 0.03, "thirdless_penalty": 0.05, "slash_bass_mass": 0.35,
-        "key_window_segs": 16, "gate_tau": 0.09, "miss_weight": 0.6,
+        "key_penalty": 0.03, "thirdless_penalty": 0.20, "slash_bass_mass": 0.35,
+        "key_window_segs": 16, "gate_tau": 0.18, "miss_weight": 0.6,
         "absent_weight": 1.5, "absent_tau": 0.08,
     },
     "arrange": {

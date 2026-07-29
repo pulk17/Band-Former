@@ -141,11 +141,13 @@
     <div class="settingsForm">
       <label class="settingRow">
         Separation quality:
-        <select id="optSep">
-          <option value="best">Best — Roformer + Demucs (2-stage)</option>
+        <select id="optSep" title="Which models split the song apart. The instrument stem gates everything downstream — notes, chords, tab — so this is the single biggest accuracy lever.">
+          <option value="best">Best — Roformer vocals + Demucs (2-stage)</option>
+          <option value="ultra">Ultra — Roformer vocals + Roformer-SW instruments (slowest, cleanest)</option>
           <option value="fast">Fast — Demucs only</option>
         </select>
       </label>
+      <div id="sepHint" class="settingHint"></div>
       <label class="settingRow"><input type="checkbox" id="optBeats" checked> Extract Beats</label>
       <label class="settingRow"><input type="checkbox" id="optVocals" checked> Extract Vocals</label>
       <label class="settingRow">

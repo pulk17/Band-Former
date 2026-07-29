@@ -36,14 +36,19 @@ struct ClassifierConfig {
                                         // low-confidence name is better UX
                                         // than an "unknown" hole mid-song
     double key_penalty        = 0.03;   // per chord tone outside the local key
-    double thirdless_penalty  = 0.05;   // prior against 5/sus chords (no third):
-                                        // when a third is audible the triad
-                                        // should win; these only fire when the
-                                        // third is genuinely absent
+    double thirdless_penalty  = 0.20;   // prior against 5/sus chords (no third).
+                                        // Measured on 4 songs: at 0.05 the
+                                        // classifier dodged into power/sus
+                                        // labels for ~60% of chords; at 0.20
+                                        // maj/min share went 26%→91% (WIMM)
+                                        // and chord accuracy 37%→84%
     double slash_bass_mass    = 0.35;   // min L1 mass for a slash-bass label
     int    key_window_segs    = 16;     // local key window length (segments)
     // Scoring internals (see tuning.json):
-    double gate_tau           = 0.09;   // color tone must exceed this mass
+    double gate_tau           = 0.18;   // color tone must exceed this mass.
+                                        // 0.09 let CQT leak into the 2nd/9th
+                                        // qualify as a real tone, so plain
+                                        // triads were labelled sus2/add9
     double miss_weight        = 0.6;    // penalty weight for off-chord mass
     double absent_weight      = 1.5;    // penalty weight for silent chord tones
     double absent_tau         = 0.08;   // "present" threshold for chord tones

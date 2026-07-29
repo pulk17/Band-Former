@@ -82,10 +82,13 @@ before shape lookup (`jsVoicing`, `_parse`).
 
 Stem file naming (glob contracts — NEVER rename patterns without fixing globs in
 `run_pipeline.py`, `separation.py`):
-`{stem}_(Guitar|Bass|Piano|Other|Drums|Vocals)_htdemucs_6s.wav`,
-`{stem}_(Vocals|Instrumental)_roformer.wav`, `{stem}_(Combined)_htdemucs_6s.wav`
-(mono sum of guitar+bass+piano+other = chord-analysis mix), `(Residual)` = htdemucs'
-vocal output when input was already de-vocaled (must NOT match vocal globs).
+`{stem}_(Guitar|Bass|Piano|Other|Drums|Vocals)_{tag}.wav` where tag is the stage-B
+model (`htdemucs_6s` or `roformer_sw`), `{stem}_(Vocals|Instrumental)_roformer.wav`,
+`{stem}_(Combined).wav` (mono sum of guitar+bass+piano+other = chord-analysis mix),
+`(Residual)` = the stage-B model's vocal output when its input was already de-vocaled
+(must NOT match vocal globs). Separators name files inconsistently, so
+`_canonicalize_stems()` rewrites every output to this scheme after each pass — that's
+what lets the stage-B model be swapped without touching any glob.
 
 ### Build & run
 
@@ -167,9 +170,11 @@ d=data/output/SONG
     Bezubaan = drone-heavy stress test (D-rooted, −30 cents). Change one knob at a time;
     re-run BOTH songs with the fast iteration loop before accepting.
 16. **The 5th harmonic of any root lands on its MAJOR THIRD's pitch class**, and CQT
-    kernels leak into neighbor semitones. Both are already mitigated (lateral inhibition
-    q_mult 1.8 / 0.30). If you touch chroma code, re-verify the WIMM A-major segment:
-    A mass must exceed A#/G# leak bins, C# must be visible (~0.04+).
+    kernels leak into neighbor semitones. Both are already mitigated (q_mult 1.8,
+    lateral inhibition 0.40). If you touch chroma code, re-verify the WIMM A-major
+    segment: A mass must exceed A#/G# leak bins, C# must be visible (~0.04+).
+    The leak also drives QUALITY errors, which is what `gate_tau` and
+    `thirdless_penalty` defend against — see Section 4.1 for the measurements.
 17. **Everything is currently UNCOMMITTED on top of `d58100e`.** First action of any
     session: `git add -A && git commit` the working state (message:
     "feat: chord engine v2, separation v2, tiles mode, UI shell, learn engine, tuning knobs").
@@ -235,6 +240,11 @@ As Golden Rule 17. Also add to `.gitignore` if missing: `data/`, `pipeline/model
 stems — it prints the no-stem warning and restores nothing; that's fine).
 
 ### T2. Verify separation v2 (GPU required)
+Three profiles now (`pipeline/config.py: SEPARATION_PROFILES`): `fast` = htdemucs only,
+`best` = Roformer vocals → htdemucs_6s, `ultra` = Roformer vocals → **BS-Roformer-SW**
+(jarredou's 6-stem model — same six sources as htdemucs, cleaner guitar/piano, ~1 GB
+first-run download). Stage-B output filenames are normalised afterwards, so a model that
+ignores `custom_output_names` can't break the globs.
 **Steps**:
 1. Settings → Separation quality "Best". Add any NEW song.
 2. First run downloads `model_bs_roformer_ep_317_sdr_12.9755.ckpt` (~600 MB) into
@@ -373,6 +383,43 @@ lead-vocal karaoke separation model; per-song tuning.json overrides; Electron pa
    first (quality second, sus/maj confusion is a known acceptable miss).
 5. Never delete tuning.json keys the C++ engine reads — it falls back silently and you'll
    think your knob does nothing.
+
+### 4.1 The chord-quality fix (worked example of the protocol)
+
+Symptom the user reported: "the chords are wrong". Measuring rather than guessing found
+the roots were already right — it was QUALITY that was broken, and in a specific way:
+the classifier dodged the third. WIMM decoded as `E:5 G#:sus4 G#:maj A:sus2 …` when the
+song is plainly E – C#m – G# – A.
+
+Why: a CQT bin leaks into its neighbours, and the 2nd/9th of a chord sits only two
+semitones from the root — right inside the leak. So `sus2`/`add9` templates got fed leak
+mass and beat the true triad, while `thirdless_penalty` (0.05) was too weak to stop the
+classifier retreating to a bare power chord whenever the third was merely quiet.
+
+Measured, one knob at a time, engine-only runs (~40 s per song, no GPU):
+
+| setting | WIMM chord accuracy | maj+min share |
+|---|---|---|
+| baseline (inhib 0.30, gate 0.09, thirdless 0.05) | 37.4% | 26.1% |
+| inhibition 0.40 | — | 36.8% |
+| + gate_tau 0.14, thirdless 0.20 | 74.6% | 77.9% |
+| **+ gate_tau 0.18 (shipped)** | **83.5%** | **91.0%** |
+
+Validated on three more songs before shipping (Golden Rule 15) — maj/min share and the
+share of sounding note-time the chords explain, both held or improved everywhere:
+darkhaast 31.5%→75.8% (explained 76.9%→76.5%), Bezubaan 20.2%→68.0% (64.5%→68.7%),
+tiles_test 23.1%→45.5% (34.3%→35.4%).
+
+Two dead ends worth not repeating:
+- **`key_penalty` makes it worse** (74.6%→69.4% at 0.10, 61.2% at 0.18). WIMM's G# major
+  is borrowed (V/vi in E), so punishing out-of-key chords punishes the correct answer.
+  Real songs modulate and borrow; keep this knob small.
+- **`gate_tau` alone at 0.20** kills sus but sends 57% of chords to bare power chords —
+  gating the color tone without `thirdless_penalty` just moves the dodge.
+
+Remaining known error: ~12 C#-rooted chords come out major instead of minor — that's
+Golden Rule 16's 5th-harmonic trap (C#'s 5th harmonic lands on E#/F, faking a major
+third). Fixing it needs harmonic subtraction in the chroma, not a knob.
 
 ## 5. Environment rebuild (if venv is ever lost)
 
