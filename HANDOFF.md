@@ -396,6 +396,38 @@ lead-vocal karaoke separation model; per-song tuning.json overrides; Electron pa
 5. Never delete tuning.json keys the C++ engine reads — it falls back silently and you'll
    think your knob does nothing.
 
+### 4.0 refine.py — why the transcription used to be unplayable
+
+User report: "sounds like it, but very far from hearable and much further from playable."
+Measuring Where Is My Mind said exactly why:
+
+| | before | after refine |
+|---|---|---|
+| notes with energy at their own pitch | 55.2% | 67.6% |
+| notes belonging to the sounding chord | 66.8% | 81.2% |
+| notes per second | 7.9 | 5.0 |
+| median note length | 170 ms | 370 ms |
+
+12 notes/sec of raw transcription for an arpeggiated riff, ~45% of them with no matching
+energy in the guitar stem at all, up to 42 simultaneous onsets (on a six-string guitar),
+144 same-pitch restrikes under 120 ms, and notes 150 ms long where a plucked string rings
+for seconds. `refine.py` runs before `arrange()` and fixes all of that; knobs live under
+`refine` in tuning.json, `refine.enabled = 0` disables the stage.
+
+Validated on darkhaast too, where it improves every axis at once (support 92.5→99.6%,
+chord conformance 73.6→83.6%, onset coverage 20.9→21.7%).
+
+**Two traps here — do not repeat them:**
+- **Normalise support LOCALLY.** The first version scored a note's energy against how loud
+  that pitch is across the whole song; quiet passages then look like silence and get
+  deleted, which removed 9 of the 14 notes in WIMM's intro riff. Comparing a note against
+  the other pitches sounding *at that instant* fixes it.
+- **Do NOT "rescue" weak notes by shifting them ±12/+7/−5 semitones.** 67% of unsupported
+  notes have energy at one of those offsets, which looks like a pile of octave errors
+  waiting to be corrected. It isn't: those are the note's own harmonics (and Golden Rule
+  16's 5th-harmonic trap). Shifting notes onto them would move real notes onto their own
+  overtones.
+
 ### 4.1 The chord-quality fix (worked example of the protocol)
 
 Symptom the user reported: "the chords are wrong". Measuring rather than guessing found

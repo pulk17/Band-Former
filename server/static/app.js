@@ -1208,6 +1208,7 @@
 
   // ── Tuning panel: every pipeline knob, editable in-app ────────────────────
   const TUNING_SECTIONS = {
+    refine:  "Playability (note cleanup)",
     chord:   "Chords",
     chroma:  "Note detection (chroma)",
     arrange: "Lead / rhythm & note cleanup",
@@ -1215,6 +1216,15 @@
     tiles:   "Piano-tiles video",
   };
   const TUNING_HINTS = {
+    "refine.enabled": "1 = clean the transcription against the audio, 0 = keep every raw note",
+    "refine.verify_tau": "how much energy a note needs at its own pitch to be believed — raise to delete more invented notes, lower if real notes vanish",
+    "refine.dechatter_ms": "the same note restruck faster than this is treated as one held note",
+    "refine.event_ms": "notes starting within this are one strum",
+    "refine.min_event_gap_ms": "minimum gap between strums — raise if strumming sounds machine-gunned",
+    "refine.grid_snap_ms": "pull strums onto the beat grid if they're within this (0 = leave timing alone)",
+    "refine.nonchord_tau": "evidence a note needs to survive when it's outside the chord — raise for cleaner harmony",
+    "refine.max_polyphony": "most notes allowed in one strum (a guitar has 6 strings)",
+    "refine.ring_seconds": "how long a plucked string keeps ringing — the main reason playback sounds like a guitar and not blips",
     "chord.transition_penalty": "higher = chords change less often",
     "chord.complexity_penalty": "higher = plain maj/min preferred over maj7/7ths",
     "chord.thirdless_penalty": "higher = fewer sus2/sus4/5 chords",

@@ -202,7 +202,17 @@ def process_audio(audio_path: Path | str, instrument: str = "guitar", on_stage=N
         report("Arranging")
         try:
             from arrange import arrange
-            data = arrange(json.loads(tab_json.read_text()))
+            data = json.loads(tab_json.read_text())
+            # Verify the transcription against the stem it came from and reduce
+            # it to something a person could actually play, BEFORE the arranger
+            # splits lead from rhythm — otherwise the melody gets picked out of
+            # notes that were never really there.
+            try:
+                from refine import refine
+                data = refine(data, separation_result.guitar_stem_path)
+            except Exception as exc:  # noqa: BLE001
+                print(f"  ⚠ Refinement skipped: {exc}")
+            data = arrange(data)
             from analyze import build_analysis
             data["analysis"] = build_analysis(data)
             tab_json.write_text(json.dumps(data, indent=2))
@@ -362,6 +372,9 @@ def process_tiles_video(audio_path: Path | str, video_path: Path | str,
     if tab_json.exists():
         report("Arranging")
         try:
+            # No refine() pass here: these notes were read off the video, not
+            # guessed from audio, so there is nothing to verify — and the audio
+            # can't judge them anyway (see tools/tiles_audit.py).
             from arrange import arrange
             data = arrange(json.loads(tab_json.read_text()))
             from analyze import build_analysis

@@ -421,6 +421,11 @@ TUNING_FACTORY = {
         "key_window_segs": 16, "gate_tau": 0.18, "miss_weight": 0.6,
         "absent_weight": 1.5, "absent_tau": 0.08,
     },
+    "refine": {
+        "enabled": 1, "verify_tau": 1.5, "dechatter_ms": 110, "event_ms": 55,
+        "min_event_gap_ms": 105, "grid_snap_ms": 45, "nonchord_tau": 4.0,
+        "max_polyphony": 6, "ring_seconds": 1.6,
+    },
     "arrange": {
         "ghost_dur": 0.07, "melody_min_dur": 0.10, "min_chord_dur": 0.45,
         "lead_max_poly": 2, "skyline_gap_semitones": 5, "harmonic_ghost_max_dur": 0.09,
