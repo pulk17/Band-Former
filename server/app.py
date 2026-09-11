@@ -83,10 +83,35 @@ def _processed_instrument(stem: str) -> str | None:
         return "guitar"
 
 
-# YouTube needs a JS runtime to solve its player challenges; yt-dlp only looks for
-# deno unless told otherwise, and node is what most machines already have.
-_YDL_BASE = {'quiet': True, 'noprogress': True, 'noplaylist': True, 'color': 'never',
-             'js_runtimes': {'deno': {}, 'node': {}}}
+# Optional: youtube.com cookies (Netscape cookies.txt) for when YouTube bot-checks
+# this IP and the embedded-player fallback isn't enough. Git-ignored.
+YT_COOKIES = BASE_DIR / "data" / "youtube_cookies.txt"
+
+
+def _ydl() -> dict:
+    """Options every yt-dlp call shares."""
+    opts = {'quiet': True, 'noprogress': True, 'noplaylist': True, 'color': 'never',
+            # YouTube needs a JS runtime for its player challenges; yt-dlp only
+            # looks for deno unless told otherwise, and node is the common one.
+            'js_runtimes': {'deno': {}, 'node': {}},
+            # web_embedded still answers when the other clients get "Sign in to
+            # confirm you're not a bot" (embeddable videos only, ~96k audio).
+            'extractor_args': {'youtube': {'player_client': ['default', 'web_embedded']}}}
+    if YT_COOKIES.exists():
+        opts['cookiefile'] = str(YT_COOKIES)
+    return opts
+
+
+def _yt_error(e: Exception) -> str:
+    msg = str(e)
+    if "not a bot" in msg or "429" in msg:
+        return msg + (" | YouTube is rate-limiting this connection (too many downloads in a short"
+                      " time). It usually clears within a few hours. To get past it now, export"
+                      f" your youtube.com cookies in cookies.txt format to {YT_COOKIES}")
+    if "403" in msg:
+        return msg + (" | YouTube changed something and yt-dlp is behind: run"
+                      " pip install -U \"yt-dlp[default]\" and restart the server")
+    return msg
 
 
 class MusicManager:
@@ -100,13 +125,13 @@ class MusicManager:
         return tab.exists()
 
     def get_youtube_info(self, url: str) -> dict:
-        with yt_dlp.YoutubeDL(_YDL_BASE) as ydl:
+        with yt_dlp.YoutubeDL(_ydl()) as ydl:
             return ydl.extract_info(url, download=False)
 
     def download_youtube(self, url: str, stem: str) -> Path:
         """Download bestaudio -> {stem}.mp3 (readable title-based name)."""
         ydl_opts = {
-            **_YDL_BASE,
+            **_ydl(),
             'format': 'bestaudio/best',
             'outtmpl': str(self.input_dir / f'{stem}.%(ext)s'),
             'postprocessors': [{
@@ -126,7 +151,7 @@ class MusicManager:
         vdir.mkdir(parents=True, exist_ok=True)
         dest = vdir / f"{stem}.mp4"
         ydl_opts = {
-            **_YDL_BASE,
+            **_ydl(),
             'format': 'bv*[height<=720][ext=mp4]/bv*[ext=mp4]/bv*',
             'outtmpl': str(dest),
             'overwrites': True,
@@ -304,7 +329,7 @@ def transcribe_youtube(req: YouTubeRequest) -> JSONResponse:
     try:
         info = music_manager.get_youtube_info(req.url)   # metadata only (no download)
     except Exception as e:
-        raise HTTPException(400, f"Could not fetch YouTube info: {e}")
+        raise HTTPException(400, f"Could not fetch YouTube info: {_yt_error(e)}")
 
     title = info.get('title') or info.get('id') or "youtube"
     stem = _safe_stem(title)                  # readable, title-based id used everywhere
@@ -320,9 +345,7 @@ def transcribe_youtube(req: YouTubeRequest) -> JSONResponse:
         dest = music_manager.download_youtube(req.url, stem)
         video_path = music_manager.download_youtube_video(req.url, stem) if req.tiles else None
     except Exception as e:
-        hint = (" (YouTube changed something and yt-dlp is behind; run "
-                "pip install -U \"yt-dlp[default]\" and restart the server)") if "403" in str(e) else ""
-        raise HTTPException(500, f"Download failed: {e}{hint}")
+        raise HTTPException(500, f"Download failed: {_yt_error(e)}")
 
     job = Job(id=job_id, name=title, song_stem=stem)
     with _lock:

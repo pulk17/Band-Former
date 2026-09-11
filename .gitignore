@@ -27,6 +27,7 @@ pipeline/models/*.ckpt
 data/input/
 data/output/
 data/video/
+data/youtube_cookies.txt
 
 # ── C++ build artifacts ──────────────────────────────────────
 tab_engine/build/
