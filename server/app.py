@@ -83,6 +83,12 @@ def _processed_instrument(stem: str) -> str | None:
         return "guitar"
 
 
+# YouTube needs a JS runtime to solve its player challenges; yt-dlp only looks for
+# deno unless told otherwise, and node is what most machines already have.
+_YDL_BASE = {'quiet': True, 'noprogress': True, 'noplaylist': True, 'color': 'never',
+             'js_runtimes': {'deno': {}, 'node': {}}}
+
+
 class MusicManager:
     """Manages parsing, caching, and downloading of music files."""
     def __init__(self, input_dir: Path, output_dir: Path):
@@ -94,13 +100,13 @@ class MusicManager:
         return tab.exists()
 
     def get_youtube_info(self, url: str) -> dict:
-        ydl_opts = {'quiet': True, 'noplaylist': True}
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with yt_dlp.YoutubeDL(_YDL_BASE) as ydl:
             return ydl.extract_info(url, download=False)
 
     def download_youtube(self, url: str, stem: str) -> Path:
         """Download bestaudio -> {stem}.mp3 (readable title-based name)."""
         ydl_opts = {
+            **_YDL_BASE,
             'format': 'bestaudio/best',
             'outtmpl': str(self.input_dir / f'{stem}.%(ext)s'),
             'postprocessors': [{
@@ -108,8 +114,6 @@ class MusicManager:
                 'preferredcodec': 'mp3',
                 'preferredquality': '192',
             }],
-            'quiet': True,
-            'noplaylist': True,
             'overwrites': True,
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -122,10 +126,9 @@ class MusicManager:
         vdir.mkdir(parents=True, exist_ok=True)
         dest = vdir / f"{stem}.mp4"
         ydl_opts = {
+            **_YDL_BASE,
             'format': 'bv*[height<=720][ext=mp4]/bv*[ext=mp4]/bv*',
             'outtmpl': str(dest),
-            'quiet': True,
-            'noplaylist': True,
             'overwrites': True,
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -317,7 +320,9 @@ def transcribe_youtube(req: YouTubeRequest) -> JSONResponse:
         dest = music_manager.download_youtube(req.url, stem)
         video_path = music_manager.download_youtube_video(req.url, stem) if req.tiles else None
     except Exception as e:
-        raise HTTPException(500, f"Download failed: {e}")
+        hint = (" (YouTube changed something and yt-dlp is behind; run "
+                "pip install -U \"yt-dlp[default]\" and restart the server)") if "403" in str(e) else ""
+        raise HTTPException(500, f"Download failed: {e}{hint}")
 
     job = Job(id=job_id, name=title, song_stem=stem)
     with _lock:

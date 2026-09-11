@@ -52,14 +52,15 @@ numpy
 scipy
 librosa
 soundfile
-yt-dlp
+# [default] pulls yt-dlp-ejs (YouTube challenge solver). YouTube breaks old
+# yt-dlp every few months; a 403 on download means: pip install -U "yt-dlp[default]"
+yt-dlp[default]>=2026.8.19
 torchcrepe
 
 # Web app (FastAPI backend + Canvas frontend)
 fastapi
 uvicorn[standard]
 python-multipart
-yt-dlp
 
 # Testing
 pytest
