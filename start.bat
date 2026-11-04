@@ -10,6 +10,11 @@ if not exist ".venv\Scripts\python.exe" (
   exit /b 1
 )
 
+REM YouTube breaks old yt-dlp every few months (downloads fail with 403), so
+REM pull the latest on every launch. Offline / pip failure is fine: keep going.
+echo Updating yt-dlp...
+".venv\Scripts\python.exe" -m pip install -q -U "yt-dlp[default]" >nul 2>&1
+
 echo Starting Band-Former server...
 start "Band-Former server  (close this window to stop)" /min ".venv\Scripts\python.exe" -m uvicorn server.app:app --host 127.0.0.1 --port 8000
 
