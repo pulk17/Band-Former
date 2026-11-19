@@ -296,6 +296,11 @@ def refine(tab: dict, stem_path=None, verbose: bool = True) -> dict:
     notes.sort(key=lambda n: (n["start"], n["pitch"]))
 
     support = note_support(notes, stem_path, ) if stem_path else [1.0] * len(notes)
+    # Tells arrange the survivors were checked against the audio, so its
+    # duration-based ghost filters must not run: transcribers report the attack
+    # (~100 ms), not how long the string rings, and half of the real notes are
+    # shorter than those filters' cut-off until fingering lets them ring.
+    tab.setdefault("metadata", {})["verified"] = bool(stem_path and verify_tau > 0)
     if stem_path and verify_tau > 0:
         pairs = [(n, s) for n, s in zip(notes, support) if s >= verify_tau]
         notes = [n for n, _ in pairs]
@@ -325,14 +330,12 @@ def refine(tab: dict, stem_path=None, verbose: bool = True) -> dict:
     n4 = len(notes)
 
     notes.sort(key=lambda n: (n["start"], n["pitch"]))
-    fixed, rung = resolve_strings(notes, float(_knob("refine", "ring_seconds", 1.6)))
-
+    # Strings are assigned later (fingering.py), so resolve_strings runs there.
     tab["notes"] = notes
     if verbose:
         dur = tab.get("metadata", {}).get("duration_sec") or 1
         print(f"  refine: {n0} notes -> {n4}  "
               f"(unverified -{n0-n1}, chatter -{n1-n2}, crowded events -{n2-n3}, "
-              f"off-chord/unplayable -{n3-n4}; {moved} events snapped, "
-              f"{fixed} string clashes cut, {rung} notes left to ring)")
+              f"off-chord/unplayable -{n3-n4}; {moved} events snapped)")
         print(f"  refine: density {n0/dur:.1f} -> {n4/dur:.1f} notes/sec")
     return tab

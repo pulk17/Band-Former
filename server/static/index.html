@@ -55,6 +55,10 @@
         <span class="badge" id="bpmBadge">— bpm</span>
         <span class="badge" id="capoBadge" style="display:none">capo —</span>
         <span class="badge" id="diffBadge" style="display:none">difficulty —</span>
+        <select id="detailSel" class="badge" title="Simple: plain major/minor chords, about one change per bar. Detailed: every 7th, sus and slash chord the detector heard.">
+          <option value="simple">Chords: simple</option>
+          <option value="full">Chords: detailed</option>
+        </select>
       </div>
       <div class="seg" id="viewSeg" title="View">
         <button data-view="overview" class="active">Overview</button>
@@ -142,7 +146,6 @@
       <label class="ctl">Capo<select id="capoSel"></select></label>
       <button id="loopBtn" title="Set A then B to loop">Loop</button>
       <button id="metroBtn" title="Metronome">Metro</button>
-      <button id="barsBtn" title="Quantize chords to whole bars — one chord per bar, kills rapid changes">Bars</button>
     </footer>
   </div>
 </div>

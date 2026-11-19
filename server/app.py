@@ -462,7 +462,7 @@ TUNING_FACTORY = {
         "max_polyphony": 6, "ring_seconds": 1.6,
     },
     "arrange": {
-        "ghost_dur": 0.07, "melody_min_dur": 0.10, "min_chord_dur": 0.45,
+        "ghost_dur": 0.07, "melody_min_dur": 0.10,
         "lead_max_poly": 2, "skyline_gap_semitones": 5, "harmonic_ghost_max_dur": 0.09,
     },
     "vocals": {
@@ -524,6 +524,14 @@ def set_tuning(body: dict) -> JSONResponse:
         pass
     _TUNING_PATH.write_text(json.dumps({**keep, **clean}, indent=2))
     return JSONResponse({"ok": True})
+
+
+@app.get("/api/shapes")
+def shapes() -> dict:
+    """Chord shape tables for the UI's diagrams, straight from arrange.py."""
+    from arrange import SHAPES, OPEN_SHAPES
+    return {"barre": SHAPES,
+            "open": {f"{pc}|{q}": [nm, frets] for (pc, q), (nm, frets) in OPEN_SHAPES.items()}}
 
 
 @app.get("/api/jobs")

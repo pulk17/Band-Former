@@ -24,6 +24,7 @@ for _s in (sys.stdout, sys.stderr):   # UTF-8 so ✓ prints don't crash on Windo
         pass
 
 from arrange import NOTE_PC, PC_NOTE, _parse, voicing
+from chords_cleanup import display_name
 
 MAJ_DEG = [0, 2, 4, 5, 7, 9, 11]
 MIN_DEG = [0, 2, 3, 5, 7, 8, 10]
@@ -222,8 +223,12 @@ def build_analysis(tab: dict) -> dict:
     for c in chords:
         time_per[c["name"]] += max(0.0, c["end"] - c["start"])
     romans, functions = {}, {}
+    # The detailed level (chords_full) is shown on demand, so its names need
+    # roman numerals too.
+    names = set(time_per) | {c["name"] for c in tab.get("chords_full", [])
+                             if c.get("name") not in ("silence", "unknown")}
     if tonic is not None:
-        for name in time_per:
+        for name in names:
             root = _root_name(name)
             if root in NOTE_PC:
                 info = _roman_for(NOTE_PC[root], _quality(name), tonic, major)
@@ -328,7 +333,9 @@ def build_analysis(tab: dict) -> dict:
     }
 
     # ── Practice plan (ordered, data-driven) ─────────────────────────────────
-    top_names = [n for n, _ in time_per.most_common(4)]
+    flats = bool(meta.get("flats"))
+    dn = lambda n: display_name(n, flats)
+    top_names = [dn(n) for n, _ in time_per.most_common(4)]
     plan = [
         {"step": "shapes", "title": "Learn the shapes",
          "detail": f"Master the {min(uniq, 6)} most-used chords first: "
@@ -338,7 +345,7 @@ def build_analysis(tab: dict) -> dict:
     if transitions:
         t0 = transitions[0]
         plan.append({"step": "changes", "title": "Drill the #1 change",
-                     "detail": f"{t0['from']} → {t0['to']} happens {t0['count']}× "
+                     "detail": f"{dn(t0['from'])} → {dn(t0['to'])} happens {t0['count']}× "
                                f"— loop it at 0.5× with the metronome until clean"})
     plan.append({"step": "rhythm", "title": "Rhythm with the beat",
                  "detail": "Play along muted (just strum the beat), then add chords"})

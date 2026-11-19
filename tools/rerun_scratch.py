@@ -24,13 +24,9 @@ by = {}
 for n in raw_engine:
     by.setdefault((round(n["start"], 3), n["string"]), []).append(n)
 print(f"   engine notes {len(raw_engine)}; exact-same-onset same-string collisions: {sum(1 for v in by.values() if len(v) > 1)}")
-from refine import refine
-from arrange import arrange
-from analyze import build_analysis
+from run_pipeline import finish_tab
 t1 = time.time()
-tab = refine(tab, guitar)
-print(f"refine {time.time()-t1:.0f}s")
-tab = arrange(tab)
-tab["analysis"] = build_analysis(tab)
+tab = finish_tab(tab, guitar)
+print(f"refine+arrange+fingering {time.time()-t1:.0f}s")
 tab.setdefault("metadata", {})["instrument"] = "guitar(rerun)"
 (out / "tab.json").write_text(json.dumps(tab))

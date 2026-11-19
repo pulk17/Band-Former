@@ -4,7 +4,7 @@ from collections import Counter
 from pathlib import Path
 
 root = Path(sys.argv[1])
-for d in sorted(root.iterdir()):
+for d in sorted(p for p in root.iterdir() if p.is_dir()):
     tj = d / "tab.json"
     if not tj.exists():
         print(f"\n== {d.name[:40]}: NO tab.json; files={len(list(d.iterdir()))}")
@@ -50,7 +50,8 @@ for d in sorted(root.iterdir()):
         by = Counter((round(n['start'], 2), n['string']) for n in notes)
         print(f"   same-onset same-string collisions: {sum(1 for v in by.values() if v > 1)}")
         # hand jumps between consecutive fretted notes
-        fr = [n['fret'] for n in sorted(notes, key=lambda n: n['start']) if n['fret'] > 0]
+        capo = m.get("capo") or 0   # a string played open at the capo is not a fretted note
+        fr = [n['fret'] for n in sorted(notes, key=lambda n: n['start']) if n['fret'] > capo]
         jumps = sum(1 for a, b in zip(fr, fr[1:]) if abs(a - b) > 5)
         print(f"   fret jumps >5 between consecutive fretted notes: {jumps} of {max(1,len(fr)-1)} ({jumps/max(1,len(fr)-1):.0%})")
     a = t.get("analysis", {})

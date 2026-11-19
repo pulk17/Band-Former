@@ -24,7 +24,7 @@ from pipeline import (
 
 # Bump whenever a change alters what ends up in tab.json, so the library can
 # flag songs processed by an older pipeline as outdated.
-PIPELINE_VERSION = 2
+PIPELINE_VERSION = 3
 
 _NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
@@ -32,6 +32,35 @@ _NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 def midi_to_name(midi_pitch: int) -> str:
     octave = (midi_pitch // 12) - 1
     return f"{_NOTE_NAMES[midi_pitch % 12]}{octave}"
+
+
+def finish_tab(data: dict, stem_path=None) -> dict:
+    """Engine output -> a tab a person can play, in the order that matters:
+
+    1. refine  — drop notes the stem has no energy for (skipped for tiles songs:
+                 their notes were read off the video, there is nothing to verify);
+    2. arrange — chords, key, capo, lead vs rhythm;
+    3. fingering, last — strings and frets for the notes that survived, above
+                 the capo that arrange chose;
+    4. let each string ring until it is next played (audio songs only — tiles
+       notes already carry their real lengths), then analyse.
+    """
+    from arrange import arrange
+    from analyze import build_analysis
+    from fingering import assign_fingering
+    from refine import refine, resolve_strings
+    from tuning import knob
+    if stem_path:
+        try:
+            data = refine(data, stem_path)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ⚠ Refinement skipped: {exc}")
+    data = arrange(data)
+    data["notes"] = assign_fingering(data["notes"], data["metadata"]["capo"], data["chords"])
+    resolve_strings(data["notes"], float(knob("refine", "ring_seconds", 1.6)) if stem_path else 0.0)
+    data["melody"] = [n for n in data["notes"] if n.get("voice") == "lead"]
+    data["analysis"] = build_analysis(data)
+    return data
 
 
 def find_tab_engine_binary() -> Path | None:
@@ -206,20 +235,7 @@ def process_audio(audio_path: Path | str, instrument: str = "guitar", on_stage=N
             pass
         report("Arranging")
         try:
-            from arrange import arrange
-            data = json.loads(tab_json.read_text())
-            # Verify the transcription against the stem it came from and reduce
-            # it to something a person could actually play, BEFORE the arranger
-            # splits lead from rhythm — otherwise the melody gets picked out of
-            # notes that were never really there.
-            try:
-                from refine import refine
-                data = refine(data, separation_result.guitar_stem_path)
-            except Exception as exc:  # noqa: BLE001
-                print(f"  ⚠ Refinement skipped: {exc}")
-            data = arrange(data)
-            from analyze import build_analysis
-            data["analysis"] = build_analysis(data)
+            data = finish_tab(json.loads(tab_json.read_text()), separation_result.guitar_stem_path)
             tab_json.write_text(json.dumps(data, indent=2))
             print(f"  ✓ Arrangement: {data['metadata'].get('num_melody', 0)} "
                   f"melody notes + {len(data.get('chords', []))} chords")
@@ -377,13 +393,9 @@ def process_tiles_video(audio_path: Path | str, video_path: Path | str,
     if tab_json.exists():
         report("Arranging")
         try:
-            # No refine() pass here: these notes were read off the video, not
-            # guessed from audio, so there is nothing to verify — and the audio
-            # can't judge them anyway (see tools/tiles_audit.py).
-            from arrange import arrange
-            data = arrange(json.loads(tab_json.read_text()))
-            from analyze import build_analysis
-            data["analysis"] = build_analysis(data)
+            # No stem: these notes were read off the video, not guessed from
+            # audio, so there is nothing to verify (see tools/tiles_audit.py).
+            data = finish_tab(json.loads(tab_json.read_text()))
             meta = data.setdefault("metadata", {})
             meta["instrument"] = "tiles"
             meta["pipeline_version"] = PIPELINE_VERSION

@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 NOTE_PC = {"C": 0, "C#": 1, "D": 2, "D#": 3, "E": 4, "F": 5,
@@ -79,7 +78,6 @@ except Exception:  # noqa: BLE001
 
 GHOST_DUR = _knob("arrange", "ghost_dur", 0.07)             # drop notes shorter than this
 MELODY_MIN_DUR = _knob("arrange", "melody_min_dur", 0.10)   # melody candidates min length
-MIN_CHORD_DUR = _knob("arrange", "min_chord_dur", 0.45)     # merge chord segments shorter
 LEAD_MAX_POLY = _knob("arrange", "lead_max_poly", 2)        # sparse-slot cutoff for lead
 SKYLINE_GAP = _knob("arrange", "skyline_gap_semitones", 5)  # top-of-strum melody separation
 GHOST_MAX_DUR = _knob("arrange", "harmonic_ghost_max_dur", 0.09)  # chord-clash ghost filter
@@ -88,10 +86,9 @@ GHOST_MAX_DUR = _knob("arrange", "harmonic_ghost_max_dur", 0.09)  # chord-clash 
 def _refresh_knobs():
     """Re-read tuning.json so in-app knob edits apply to the NEXT arrange run
     without a server restart (module constants freeze at import otherwise)."""
-    global GHOST_DUR, MELODY_MIN_DUR, MIN_CHORD_DUR, LEAD_MAX_POLY, SKYLINE_GAP, GHOST_MAX_DUR
+    global GHOST_DUR, MELODY_MIN_DUR, LEAD_MAX_POLY, SKYLINE_GAP, GHOST_MAX_DUR
     GHOST_DUR = _knob("arrange", "ghost_dur", 0.07)
     MELODY_MIN_DUR = _knob("arrange", "melody_min_dur", 0.10)
-    MIN_CHORD_DUR = _knob("arrange", "min_chord_dur", 0.45)
     LEAD_MAX_POLY = _knob("arrange", "lead_max_poly", 2)
     SKYLINE_GAP = _knob("arrange", "skyline_gap_semitones", 5)
     GHOST_MAX_DUR = _knob("arrange", "harmonic_ghost_max_dur", 0.09)
@@ -123,53 +120,6 @@ def voicing(root_pc: int, qual: str, capo: int = 0) -> dict:
         nm, frets = OPEN_SHAPES[(t, qual)]
         return {"name": nm, "frets": frets, "baseFret": 0, "open": True}
     return barre_voicing(root_pc, qual, capo)
-
-
-def pick_capo(chords) -> int:
-    """Choose the capo (0..7) that makes the most (frequency-weighted) chords open.
-
-    Power chords are excluded: they're a movable 2-finger shape that's equally
-    easy at any fret, so they shouldn't sway the capo. A mild per-fret penalty
-    breaks near-ties toward a lower, more comfortable capo position.
-    """
-    counts = defaultdict(float)
-    for c in chords:
-        p = _parse(c["name"])
-        if p and p[1] != "5":
-            counts[p] += max(0.0, c.get("end", 0) - c.get("start", 0))  # weight by playing time
-    if not counts:
-        return 0
-    best_capo, best_score = 0, -1e9
-    for capo in range(8):
-        cov = sum(n for (pc, q), n in counts.items()
-                  if ((pc - capo) % 12, q) in OPEN_SHAPES)
-        score = cov - 0.5 * capo
-        if score > best_score:
-            best_score, best_capo = score, capo
-    return best_capo
-
-
-def merge_chords(chords):
-    """Collapse same-name neighbours and absorb sub-threshold flicker segments."""
-    out = []
-    for c in chords:
-        if c.get("name") in ("silence", "unknown"):
-            continue
-        if out and out[-1]["name"] == c["name"]:
-            out[-1]["end"] = c["end"]
-        elif out and (c["end"] - c["start"]) < MIN_CHORD_DUR and \
-                (out[-1]["end"] - out[-1]["start"]) >= MIN_CHORD_DUR:
-            out[-1]["end"] = c["end"]           # swallow the brief blip
-        else:
-            out.append(dict(c))
-    # second pass: merge any new same-name adjacencies created above
-    merged = []
-    for c in out:
-        if merged and merged[-1]["name"] == c["name"]:
-            merged[-1]["end"] = c["end"]
-        else:
-            merged.append(c)
-    return merged
 
 
 def declutter(notes, min_dur):
@@ -310,8 +260,11 @@ def drop_harmonic_ghosts(notes, chords):
 def arrange(tab: dict) -> dict:
     _refresh_knobs()
     raw = tab.get("notes", [])
-    notes = declutter(raw, GHOST_DUR)          # drop ghosts from the displayed set too
-    notes = drop_harmonic_ghosts(notes, tab.get("chords", []))
+    if (tab.get("metadata") or {}).get("verified"):   # refine already proved these notes
+        notes = declutter(raw, 0.0)
+    else:
+        notes = declutter(raw, GHOST_DUR)
+        notes = drop_harmonic_ghosts(notes, tab.get("chords", []))
 
     # ── Two-voice separation: lead vs rhythm ─────────────────────────────────
     # Sparse onset slots feed the lead line (single-note playing). Dense strum
@@ -335,16 +288,34 @@ def arrange(tab: dict) -> dict:
     tab["notes"] = notes
     tab["melody"] = melody
 
-    chords = merge_chords(tab.get("chords", []))
+    # Chords: the engine's raw labels are cleaned twice. "full" keeps the
+    # detected qualities minus flicker; "simple" is plain triads, one change per
+    # couple of beats — what you actually strum along to. The UI switches
+    # between them without reprocessing. Re-running arrange on an arranged tab
+    # starts again from the full level, so it is idempotent.
+    from chords_cleanup import (bar_phase, key_from_chords, pick_capo,
+                                simple_chords, tidy_chords, use_flats)
+    beats = tab.get("beats", [])
+    gaps = sorted(b - a for a, b in zip(beats, beats[1:]) if b > a)
+    beat_len = gaps[len(gaps) // 2] if gaps else 0.5
+    full = tidy_chords(tab.get("chords_full") or tab.get("chords", []), beat_len, 1.0)
+    key = key_from_chords(full)
+    chords = simple_chords(full, key, beat_len)
     capo = pick_capo(chords)
-    for c in chords:
-        p = _parse(c["name"])
-        if p:
-            c["voicing"] = voicing(p[0], p[1], 0)
-            c["capoVoicing"] = voicing(p[0], p[1], capo)
+    for level in (full, chords):
+        for c in level:
+            p = _parse(c["name"])
+            if p:
+                c["voicing"] = voicing(p[0], p[1], 0)
+                c["capoVoicing"] = voicing(p[0], p[1], capo)
     tab["chords"] = chords
+    tab["chords_full"] = full
 
     meta = tab.setdefault("metadata", {})
+    if key:
+        meta["key"] = f"{PC_NOTE[key[0]]} {'major' if key[1] else 'minor'}"
+        meta["flats"] = use_flats(*key)
+    meta["bar_phase"] = bar_phase(beats, chords)
     meta["capo"] = capo
     meta["num_melody"] = len(melody)
     meta["num_notes_clean"] = len(notes)

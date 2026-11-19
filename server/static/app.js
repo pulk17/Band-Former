@@ -10,8 +10,8 @@
 
   // ── Data ──────────────────────────────────────────────────────────────────
   // (Chords arrive beat-synchronous from the engine — no client smoothing.)
-  let tab = null, allNotes = [], melodyNotes = [], harmonyNotes = [], chords = [], chordsRaw = [], beats = [], duration = 0;
-  let barMode = false;   // "Bars": one chord per bar (dominant by coverage)
+  let tab = null, allNotes = [], melodyNotes = [], harmonyNotes = [], chords = [], beats = [], duration = 0;
+  let detail = "simple";   // "simple" = triads, one change per bar or so; "full" = every detected quality
   let vocals = [], vpitch = [], vlo = 48, vhi = 72;
   let roll = [];   // tiles videos: exact piano notes {start,duration,pitch,hand}
   let rlo = 48, rhi = 72;   // roll view's smoothed, auto-following pitch window
@@ -21,24 +21,9 @@
   // ── Chord voicings (computed live so any capo can be selected) ────────────
   const NOTE_PC = { C: 0, "C#": 1, D: 2, "D#": 3, E: 4, F: 5, "F#": 6, G: 7, "G#": 8, A: 9, "A#": 10, B: 11 };
   const PC_NOTE = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-  // Kept in sync with arrange.py's SHAPES — every quality the chord engine
-  // can emit needs an entry or its diagram silently never renders, capo or not.
-  const BARRE = { maj: [0,2,2,1,0,0], min: [0,2,2,0,0,0], "5": [0,2,2,-1,-1,-1],
-                  "7": [0,2,0,1,0,0], maj7: [0,2,1,1,0,0], min7: [0,2,0,0,0,0], sus4: [0,2,2,2,0,0],
-                  sus2: [0,2,4,4,0,0], add9: [0,2,2,1,0,2], "6": [0,2,2,1,2,0],
-                  dim: [0,1,2,0,-1,0], aug: [0,3,2,1,1,0], m7b5: [0,1,0,0,-1,0] };
-  const OPEN = {
-    "0|maj":["C",[-1,3,2,0,1,0]],"2|maj":["D",[-1,-1,0,2,3,2]],"4|maj":["E",[0,2,2,1,0,0]],
-    "7|maj":["G",[3,2,0,0,0,3]],"9|maj":["A",[-1,0,2,2,2,0]],
-    "2|min":["Dm",[-1,-1,0,2,3,1]],"4|min":["Em",[0,2,2,0,0,0]],"9|min":["Am",[-1,0,2,2,1,0]],
-    "0|7":["C7",[-1,3,2,3,1,0]],"2|7":["D7",[-1,-1,0,2,1,2]],"4|7":["E7",[0,2,0,1,0,0]],
-    "7|7":["G7",[3,2,0,0,0,1]],"9|7":["A7",[-1,0,2,0,2,0]],"11|7":["B7",[-1,2,1,2,0,2]],
-    "0|maj7":["Cmaj7",[-1,3,2,0,0,0]],"2|maj7":["Dmaj7",[-1,-1,0,2,2,2]],"4|maj7":["Emaj7",[0,2,1,1,0,0]],
-    "5|maj7":["Fmaj7",[-1,-1,3,2,1,0]],"7|maj7":["Gmaj7",[3,2,0,0,0,2]],"9|maj7":["Amaj7",[-1,0,2,1,2,0]],
-    "2|min7":["Dm7",[-1,-1,0,2,1,1]],"4|min7":["Em7",[0,2,0,0,0,0]],"9|min7":["Am7",[-1,0,2,0,1,0]],
-    "2|sus4":["Dsus4",[-1,-1,0,2,3,3]],"4|sus4":["Esus4",[0,2,2,2,0,0]],"9|sus4":["Asus4",[-1,0,2,2,3,0]],
-    "2|5":["D5",[-1,-1,0,2,3,-1]],"4|5":["E5",[0,2,2,-1,-1,-1]],"9|5":["A5",[-1,0,2,2,-1,-1]],
-  };
+  // Shape tables come from arrange.py via /api/shapes (loaded in init), so
+  // the diagrams can never drift from what the pipeline voices.
+  let BARRE = {}, OPEN = {};
   function jsVoicing(name, c) {
     if (!name || !name.includes(":")) return null;
     const root = name.split(":")[0];
@@ -48,27 +33,21 @@
     const o = OPEN[t + "|" + qual];
     if (o) return { name: o[0], frets: o[1], baseFret: 0, open: true };
     const base = ((t - 4) % 12 + 12) % 12;
-    return { name: PC_NOTE[t] + (qual === "min" ? "m" : qual === "maj" ? "" : qual),
+    return { name: displayName(PC_NOTE[t] + ":" + qual),
              frets: BARRE[qual].map((v) => v < 0 ? -1 : v + base), baseFret: base, open: false };
   }
   const voicingOf = (c) => jsVoicing(c.name, capo);
-  const shortName = (n) => n.replace(":maj", "").replace(":min", "m").replace(":", " ");
-
-  // With a capo, a note recorded below the capo fret can't be played on its
-  // original string — re-fret the same pitch onto the nearest string that can
-  // (what a real player does), instead of hiding the note.
-  const TUNE = [64, 59, 55, 50, 45, 40];   // open-string MIDI, string 1 (high e) … 6 (low E)
-  function refret(n, c) {
-    if (n.fret >= c) return { s: n.string - 1, f: n.fret };
-    let best = null;
-    for (let s = 0; s < 6; s++) {
-      const f = n.pitch - TUNE[s];
-      if (f < c || f > 22) continue;
-      const d = Math.abs(s - (n.string - 1));
-      if (!best || d < best.d) best = { s, f, d };
-    }
-    return best;   // null → genuinely unplayable at this capo
+  // Internal names stay "C#:min7"; people read "C#m7", or "Dbm7" in a flat key.
+  const FLAT = { "C#": "Db", "D#": "Eb", "F#": "Gb", "G#": "Ab", "A#": "Bb" };
+  const SUFFIX = { maj: "", min: "m", min7: "m7" };
+  const spell = (n) => (tab && tab.metadata && tab.metadata.flats && FLAT[n]) || n;
+  function displayName(name) {
+    if (!name || !name.includes(":")) return name || "";
+    const [root, rest] = name.split(":");
+    const [qual, bass] = rest.split("/");
+    return spell(root) + (qual in SUFFIX ? SUFFIX[qual] : qual) + (bass ? "/" + spell(bass) : "");
   }
+  const keyName = (k) => { if (!k) return "—"; const [t, mode] = k.split(" "); return spell(t) + " " + (mode || ""); };
 
   // ── Web Audio ─────────────────────────────────────────────────────────────
   let actx = null, buffer = null, src = null;
@@ -294,9 +273,8 @@
     allNotes = (tab.notes || []).slice().sort((a, b) => a.start - b.start);
     melodyNotes = allNotes.filter((n) => n.voice === "lead" || n.melody);
     harmonyNotes = allNotes.filter((n) => !(n.voice === "lead" || n.melody));
-    chordsRaw = (tab.chords || []).slice().sort((a, b) => a.start - b.start);
     beats = tab.beats || [];
-    chords = barMode ? quantizeToBars(chordsRaw) : chordsRaw;
+    applyDetail();
     vocals = (tab.vocals || []).slice().sort((a, b) => a.start - b.start);
     vpitch = tab.vocal_pitch || [];
     if (vocals.length) { const ps = vocals.map((n) => n.pitch); vlo = Math.min(...ps) - 3; vhi = Math.max(...ps) + 3; }
@@ -315,7 +293,7 @@
     duration = m.duration_sec || (last ? last.start + last.duration : 0);
     $("songTitle").textContent = id;
     $("songTitle").title = id;
-    $("keyBadge").textContent = "key " + (m.key || "—");
+    $("keyBadge").textContent = "key " + keyName(m.key);
     $("bpmBadge").textContent = (m.bpm ? Number(m.bpm).toFixed(0) : "—") + " bpm";
     const diff = (analysis.difficulty || {}).overall;
     $("diffBadge").style.display = diff ? "" : "none";
@@ -426,30 +404,9 @@
     return s + "</svg>";
   }
 
-  // Bar quantize: one chord per bar (groups of 4 beats), chosen by which
-  // chord covers the most of that bar. Same-name bars merge. The engine's
-  // beat-level changes stay available by toggling off.
-  function quantizeToBars(list) {
-    if (!beats.length || beats.length < 5 || !list.length) return list;
-    const bars = [];
-    for (let i = 0; i < beats.length; i += 4) bars.push(beats[i]);
-    bars.push(Math.max(duration, beats[beats.length - 1]));
-    const out = [];
-    for (let b = 0; b < bars.length - 1; b++) {
-      const s = bars[b], e = bars[b + 1];
-      if (e - s <= 0) continue;
-      const cover = new Map();
-      for (const c of list) {
-        const ov = Math.min(e, c.end) - Math.max(s, c.start);
-        if (ov > 0) cover.set(c.name, (cover.get(c.name) || 0) + ov);
-      }
-      if (!cover.size) continue;
-      const name = [...cover.entries()].sort((x, y) => y[1] - x[1])[0][0];
-      if (out.length && out[out.length - 1].name === name && out[out.length - 1].end >= s - 0.01)
-        out[out.length - 1].end = e;
-      else out.push({ name, start: s, end: e, confidence: 1 });
-    }
-    return out.length ? out : list;
+  function applyDetail() {
+    const src = detail === "full" ? (tab.chords_full || tab.chords) : tab.chords;
+    chords = (src || []).slice().sort((a, b) => a.start - b.start);
   }
 
   function uniqueChords() {
@@ -473,7 +430,7 @@
       const ro = romans[c.name] ? `<div class="ro">${romans[c.name]}</div>` : "";
       const d = document.createElement("div");
       d.className = "chordCard"; d.dataset.name = c.name;
-      d.innerHTML = `<div class="cn">${c.name}</div>${ro}${chordSVG(v, 104)}${shape}<div class="ct">${count.get(c.name)}×</div>`;
+      d.innerHTML = `<div class="cn">${displayName(c.name)}</div>${ro}${chordSVG(v, 104)}${shape}<div class="ct">${count.get(c.name)}×</div>`;
       d.onclick = () => { const f = chords.find((x) => x.name === c.name); if (f) seekTo(f.start); };
       g.appendChild(d);
     }
@@ -492,7 +449,7 @@
     const chordTiles = sorted.slice(0, 8).map((c) => {
       const v = voicingOf(c);
       return `<div class="ovChord" data-name="${c.name}">${chordSVG(v, 74)}
-        <div class="nm">${c.name}</div><div class="ro">${romans[c.name] || ""}</div></div>`;
+        <div class="nm">${displayName(c.name)}</div><div class="ro">${romans[c.name] || ""}</div></div>`;
     }).join("");
 
     const bars = ["chords", "changes", "riff"].map((k) => {
@@ -501,7 +458,7 @@
     }).join("");
 
     const progHtml = prog
-      ? `<p class="prog">${prog.chords.map((n, i) => `<span>${shortName(n)}<span class="rn">${prog.romans[i] || ""}</span></span>`).join("<i>→</i>")}</p>
+      ? `<p class="prog">${prog.chords.map((n, i) => `<span>${displayName(n)}<span class="rn">${prog.romans[i] || ""}</span></span>`).join("<i>→</i>")}</p>
          <p class="muted">This loop repeats ${prog.count}× — it IS the song.</p>`
       : "<p class='muted'>No dominant loop found — the chords move freely.</p>";
 
@@ -510,7 +467,7 @@
         <section class="card">
           <div class="ovBig">${curJob || ""}</div>
           <div class="ovStats">
-            <div class="ovStat"><b>${m.key || "—"}</b><span>key</span></div>
+            <div class="ovStat"><b>${keyName(m.key)}</b><span>key</span></div>
             <div class="ovStat"><b>${m.bpm ? Number(m.bpm).toFixed(0) : "—"}</b><span>bpm</span></div>
             <div class="ovStat"><b>${recommendedCapo || "0"}</b><span>capo ★</span></div>
             <div class="ovStat"><b>${list.length}</b><span>chords</span></div>
@@ -564,15 +521,15 @@
       const f = functions[c.name] || {};
       const v = jsVoicing(c.name, capo);
       const play = capo > 0 && v ? `play <b>${v.name}</b>` : (v ? `<b>${v.name}</b> shape` : "");
-      return `<tr><td><b>${c.name}</b></td><td>${romans[c.name] || "?"}</td><td>${count.get(c.name)}×</td><td class="muted">${f.role || ""}</td><td>${play}</td></tr>`;
+      return `<tr><td><b>${displayName(c.name)}</b></td><td>${romans[c.name] || "?"}</td><td>${count.get(c.name)}×</td><td class="muted">${f.role || ""}</td><td>${play}</td></tr>`;
     }).join("");
 
     // scale
     let scaleHtml = "<p class='muted'>Key not detected.</p>";
     if (tonic !== undefined) {
       const degs = major ? [0,2,4,5,7,9,11] : [0,2,3,5,7,8,10];
-      const names = degs.map((d) => PC_NOTE[(tonic + d) % 12]);
-      scaleHtml = `<p><b>${key} scale:</b> ${names.join(" · ")}</p>
+      const names = degs.map((d) => spell(PC_NOTE[(tonic + d) % 12]));
+      scaleHtml = `<p><b>${keyName(key)} scale:</b> ${names.join(" · ")}</p>
         <p class="muted">These 7 notes are the "safe" notes to solo or sing over this song.</p>`;
     }
     const scales = (analysis.solo_scales || []).map((s) =>
@@ -581,14 +538,14 @@
 
     // cadences + borrowed
     const cad = (analysis.cadences || []).slice(0, 6).map((c) =>
-      `<div class="cadRow" data-t="${c.at}"><b>${fmt(c.at)}</b> — ${shortName(c.from)} → ${shortName(c.to)}<br><span class="muted">${c.type}</span></div>`).join("")
+      `<div class="cadRow" data-t="${c.at}"><b>${fmt(c.at)}</b> — ${displayName(c.from)} → ${displayName(c.to)}<br><span class="muted">${c.type}</span></div>`).join("")
       || "<p class='muted'>No clear cadences detected.</p>";
     const borrowed = (analysis.borrowed || []).slice(0, 5).map((b) =>
-      `<p><b>${b.chord}</b> (${b.label}) — <span class="muted">${b.why}</span></p>`).join("");
+      `<p><b>${displayName(b.chord)}</b> (${b.label}) — <span class="muted">${b.why}</span></p>`).join("");
 
     // transitions
     const trans = (analysis.transitions || []).slice(0, 5).map((t) =>
-      `<tr><td><b>${shortName(t.from)} → ${shortName(t.to)}</b></td><td>${t.count}×</td><td class="muted">${t.barre ? "barre involved" : "open shapes"}</td></tr>`).join("");
+      `<tr><td><b>${displayName(t.from)} → ${displayName(t.to)}</b></td><td>${t.count}×</td><td class="muted">${t.barre ? "barre involved" : "open shapes"}</td></tr>`).join("");
 
     // practice plan with persistent checkmarks
     const done = getDone();
@@ -603,7 +560,7 @@
       <div class="learnGrid">
         <section class="card">
           <h3>This song in a nutshell</h3>
-          <p><b>Key:</b> ${key || "—"} &nbsp; <b>Tempo:</b> ${m.bpm ? Number(m.bpm).toFixed(0) : "?"} BPM &nbsp; ${capo > 0 ? `<b>Capo:</b> fret ${capo}` : "<b>No capo</b>"}</p>
+          <p><b>Key:</b> ${keyName(key)} &nbsp; <b>Tempo:</b> ${m.bpm ? Number(m.bpm).toFixed(0) : "?"} BPM &nbsp; ${capo > 0 ? `<b>Capo:</b> fret ${capo}` : "<b>No capo</b>"}</p>
           ${scaleHtml}
         </section>
         <section class="card">
@@ -790,7 +747,14 @@
     const nowX = Math.round(W * NOW), ribbon = 36, top = ribbon, laneH = (H - ribbon) / 6;
     const tStart = t - nowX / PPS, tEnd = t + (W - nowX) / PPS;
 
-    if (beats.length) { sx.strokeStyle = "rgba(255,255,255,0.045)"; for (const b of beats) { const x = nowX + (b - t) * PPS; if (x < 0 || x > W) continue; sx.beginPath(); sx.moveTo(x, top); sx.lineTo(x, H); sx.stroke(); } }
+    if (beats.length) {
+      const phase = (tab.metadata || {}).bar_phase || 0;
+      beats.forEach((b, i) => {
+        const x = nowX + (b - t) * PPS; if (x < 0 || x > W) return;
+        sx.strokeStyle = (i - phase) % 4 ? "rgba(255,255,255,0.045)" : "rgba(255,255,255,0.14)";
+        sx.beginPath(); sx.moveTo(x, top); sx.lineTo(x, H); sx.stroke();
+      });
+    }
     sx.lineWidth = 1; sx.font = "11px system-ui"; sx.textBaseline = "middle"; sx.textAlign = "left";
     for (let s = 0; s < 6; s++) { const y = top + laneH * (s + 0.5); sx.strokeStyle = "rgba(255,255,255,0.07)"; sx.beginPath(); sx.moveTo(0, y); sx.lineTo(W, y); sx.stroke(); sx.fillStyle = COLORS[s]; sx.globalAlpha = 0.65; sx.fillText(LABELS[s], 7, y); sx.globalAlpha = 1; }
 
@@ -802,7 +766,7 @@
       sx.fillStyle = active ? "rgba(255,255,255,0.16)" : "rgba(255,255,255,0.035)";
       sx.fillRect(x1, 0, Math.max(2, x2 - x1), ribbon);
       sx.fillStyle = active ? "#ffffff" : "#8f99ab";
-      if (x2 - x1 > 26) sx.fillText(c.name, (Math.max(x1, 0) + Math.min(x2, W)) / 2, ribbon / 2);
+      if (x2 - x1 > 26) sx.fillText(displayName(c.name), (Math.max(x1, 0) + Math.min(x2, W)) / 2, ribbon / 2);
     }
     sx.strokeStyle = "rgba(255,255,255,0.10)"; sx.beginPath(); sx.moveTo(0, ribbon); sx.lineTo(W, ribbon); sx.stroke();
 
@@ -810,8 +774,10 @@
     sx.font = "bold 11px system-ui"; sx.textAlign = "center";
     for (let i = Math.max(0, lower(list, tStart) - 30); i < list.length; i++) {
       const n = list[i]; if (n.start > tEnd) break; if (n.start + n.duration < tStart) continue;
-      const rp = capo ? refret(n, capo) : { s: n.string - 1, f: n.fret };
-      if (!rp) continue;
+      // Frets already respect the recommended capo; only a capo raised past it
+      // puts notes out of reach.
+      if (n.fret < capo) continue;
+      const rp = { s: n.string - 1, f: n.fret };
       const s = rp.s; if (s < 0 || s > 5) continue;
       const x = nowX + (n.start - t) * PPS, w = Math.max(11, n.duration * PPS);
       const y = top + laneH * (s + 0.5), h = laneH * 0.6;
@@ -829,7 +795,7 @@
 
     // chord panel — NOW shape + role + next 3 distinct chords WITH shapes
     const cur = chordAt(t);
-    $("chordName").textContent = cur ? cur.name : "—";
+    $("chordName").textContent = cur ? displayName(cur.name) : "—";
     const fn = cur && (analysis.functions || {})[cur.name];
     $("chordRole").textContent = fn ? `${fn.roman || ""} — ${fn.role || ""}` : "";
     const diag = $("chordDiagram");
@@ -853,7 +819,7 @@
       nl.innerHTML = up.map((c) => {
         const vv = voicingOf(c);
         const shape = (capo > 0 && vv) ? `<span class="ni-shape">${vv.name}</span>` : "";
-        return `<div class="nextItem">${chordSVG(vv, 48)}<div class="ni-meta"><b>${c.name}</b>${shape}</div></div>`;
+        return `<div class="nextItem">${chordSVG(vv, 48)}<div class="ni-meta"><b>${displayName(c.name)}</b>${shape}</div></div>`;
       }).join("");
     }
   }
@@ -868,13 +834,15 @@
       tx.strokeStyle = "rgba(255,255,255,0.12)"; tx.beginPath(); tx.moveTo(0, y); tx.lineTo(W, y); tx.stroke();
       tx.textAlign = "left"; tx.fillStyle = COLORS[s]; tx.globalAlpha = 0.7; tx.fillText(LABELS[s], 9, y); tx.globalAlpha = 1;
     }
-    if (beats.length) { tx.strokeStyle = "rgba(255,255,255,0.06)"; beats.forEach((b, i) => { if (i % 4) return; const x = nowX + (b - t) * PPS; if (x < 0 || x > W) return; tx.beginPath(); tx.moveTo(x, pad); tx.lineTo(x, H - pad); tx.stroke(); }); }
+    if (beats.length) { tx.strokeStyle = "rgba(255,255,255,0.06)"; const phase = (tab.metadata || {}).bar_phase || 0; beats.forEach((b, i) => { if ((i - phase) % 4) return; const x = nowX + (b - t) * PPS; if (x < 0 || x > W) return; tx.beginPath(); tx.moveTo(x, pad); tx.lineTo(x, H - pad); tx.stroke(); }); }
     const tStart = t - nowX / PPS, tEnd = t + (W - nowX) / PPS;
     tx.font = "bold 16px ui-monospace, monospace"; tx.textAlign = "center";
     for (let i = Math.max(0, lower(melodyNotes, tStart) - 6); i < melodyNotes.length; i++) {
       const n = melodyNotes[i]; if (n.start > tEnd) break; if (n.start < tStart - 1) continue;
-      const rp = capo ? refret(n, capo) : { s: n.string - 1, f: n.fret };
-      if (!rp) continue;
+      // Frets already respect the recommended capo; only a capo raised past it
+      // puts notes out of reach.
+      if (n.fret < capo) continue;
+      const rp = { s: n.string - 1, f: n.fret };
       const s = rp.s; if (s < 0 || s > 5) continue;
       const sf = rp.f - capo;
       const x = nowX + (n.start - t) * PPS, y = pad + laneH * (s + 0.5);
@@ -1101,10 +1069,10 @@
     await prepareSynth();
     if (playing) synthIdx = lower(synthNotes(), songTime());
   };
-  $("barsBtn").onclick = () => {
-    barMode = !barMode;
-    $("barsBtn").classList.toggle("on", barMode);
-    chords = barMode ? quantizeToBars(chordsRaw) : chordsRaw;
+  $("detailSel").onchange = (e) => {
+    detail = e.target.value;
+    if (!tab) return;
+    applyDetail();
     lastName = ""; buildChordGrid(); buildOverview(); buildLearn(); dirty = true;
   };
 
@@ -1243,7 +1211,6 @@
     "chroma.lateral_inhibition": "higher = less bleed between neighbor notes",
     "arrange.ghost_dur": "notes shorter than this (s) are dropped",
     "arrange.melody_min_dur": "min length (s) for a lead-line note",
-    "arrange.min_chord_dur": "chord blips shorter than this (s) get merged",
     "arrange.lead_max_poly": "1 = strict single-note lead, 2 = allow doublestops",
     "arrange.skyline_gap_semitones": "lower = more strum-top notes join the lead",
     "arrange.harmonic_ghost_max_dur": "short off-chord notes under this (s) dropped",
@@ -1333,6 +1300,11 @@
   });
 
   async function init() {
+    try {
+      const r = await fetch("/api/shapes");
+      if (r.ok) { const sh = await r.json(); BARRE = sh.barre || {}; OPEN = sh.open || {}; }
+    } catch (e) {}
+    if (!Object.keys(BARRE).length) $("status").textContent = "Restart the server to load chord diagrams.";
     watchCanvas(stage); watchCanvas(tabStage); watchCanvas(vocalStage); watchCanvas(rollStage); watchCanvas(wave);
     requestAnimationFrame(frame);
     const jobs = await refreshJobs();
