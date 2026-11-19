@@ -55,7 +55,27 @@ def chord_pcs(name: str):
 
 # ── 1. Audio verification ────────────────────────────────────────────────────
 
-def note_support(notes, stem_path, sr=22050, hop=256):
+def stem_cqt(stem_path, sr=22050, hop=256):
+    """(normalised CQT magnitude, frames per second, silence floor) of the
+    stem, or None if it can't be read. Computed once per refine run: it is
+    the slow part (tens of seconds on a long song)."""
+    import librosa
+    import numpy as np
+
+    try:
+        y, _ = librosa.load(str(stem_path), sr=sr, mono=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  refine: cannot read {Path(stem_path).name} ({exc}) — skipping verification")
+        return None
+    if not len(y):
+        return None
+    C = np.abs(librosa.cqt(y, sr=sr, hop_length=hop, fmin=librosa.note_to_hz("C1"),
+                           n_bins=84, bins_per_octave=12))
+    C /= (C.max() or 1)
+    return C, sr / hop, float(np.median(C)) or 1e-6
+
+
+def note_support(notes, cqt):
     """How much this pitch stands out at the moment the note starts.
 
     Measured against the other pitches sounding AT THAT INSTANT, not against
@@ -67,26 +87,15 @@ def note_support(notes, stem_path, sr=22050, hop=256):
 
     Only a short window from the onset is used — a plucked note's energy is all
     at the front. Returns a list parallel to `notes`; every entry is 1.0 if the
-    audio can't be read, so a missing stem degrades to "keep everything" rather
-    than "delete everything".
+    audio can't be read (cqt is None), so a missing stem degrades to "keep
+    everything" rather than "delete everything".
     """
-    import librosa
     import numpy as np
 
-    try:
-        y, _ = librosa.load(str(stem_path), sr=sr, mono=True)
-    except Exception as exc:  # noqa: BLE001
-        print(f"  refine: cannot read {Path(stem_path).name} ({exc}) — skipping verification")
+    if cqt is None:
         return [1.0] * len(notes)
-    if not len(y):
-        return [1.0] * len(notes)
-
-    C = np.abs(librosa.cqt(y, sr=sr, hop_length=hop, fmin=librosa.note_to_hz("C1"),
-                           n_bins=84, bins_per_octave=12))
-    C /= (C.max() or 1)
-    frame = sr / hop
+    C, frame, floor = cqt
     win = max(1, int(0.12 * frame))
-    floor = float(np.median(C)) or 1e-6              # silence guard
 
     out = []
     for n in notes:
@@ -295,13 +304,14 @@ def refine(tab: dict, stem_path=None, verbose: bool = True) -> dict:
     notes = [dict(n) for n in notes]
     notes.sort(key=lambda n: (n["start"], n["pitch"]))
 
-    support = note_support(notes, stem_path, ) if stem_path else [1.0] * len(notes)
+    cqt = stem_cqt(stem_path) if stem_path else None
+    support = note_support(notes, cqt)
     # Tells arrange the survivors were checked against the audio, so its
     # duration-based ghost filters must not run: transcribers report the attack
     # (~100 ms), not how long the string rings, and half of the real notes are
     # shorter than those filters' cut-off until fingering lets them ring.
-    tab.setdefault("metadata", {})["verified"] = bool(stem_path and verify_tau > 0)
-    if stem_path and verify_tau > 0:
+    tab.setdefault("metadata", {})["verified"] = bool(cqt is not None and verify_tau > 0)
+    if cqt is not None and verify_tau > 0:
         pairs = [(n, s) for n, s in zip(notes, support) if s >= verify_tau]
         notes = [n for n, _ in pairs]
         support = [s for _, s in pairs]
@@ -310,7 +320,7 @@ def refine(tab: dict, stem_path=None, verbose: bool = True) -> dict:
         return tab
 
     notes = dechatter(notes, chatter_ms / 1000)
-    support = note_support(notes, stem_path) if stem_path else [1.0] * len(notes)
+    support = note_support(notes, cqt)
     n2 = len(notes)
 
     events = group_events(notes, event_ms / 1000)

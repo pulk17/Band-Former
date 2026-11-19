@@ -21,7 +21,8 @@ import re
 import shutil
 import sys
 import threading
-import uuid
+import time
+import traceback
 
 # The pipeline prints ✓/✗/→; on Windows the default cp1252 console can't encode
 # them and raises UnicodeEncodeError mid-job. Force UTF-8 (replace on failure).
@@ -30,10 +31,10 @@ for _s in (sys.stdout, sys.stderr):
         _s.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Body
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -65,8 +66,14 @@ class Job:
     song_stem: str
     status: str = "queued"          # queued | processing | done | error
     stage: str = ""
-    error: str = ""
+    error: str = ""                 # one plain sentence for the library row
+    detail: str = ""                # the raw error / traceback tail behind it
     outdated: bool = False          # tab.json made by an older pipeline
+    has_tab: bool = False           # a playable tab exists (kept even when a reprocess fails)
+    started: float = 0.0            # when the current run began (epoch s), for elapsed time
+    url: str = ""                   # YouTube source, if any
+    instrument: str = "guitar"
+    options: dict = field(default_factory=dict)   # what to queue again on Retry
 
 
 _jobs: dict[str, Job] = {}
@@ -191,55 +198,148 @@ def _find_source_audio(stem: str) -> Path | None:
     return _find(stem, "*[Gg]uitar*.wav")
 
 
+def _source_audio(stem: str) -> Path | None:
+    """The song's own audio in data/input — no fallback to a stem."""
+    return next((p for e in AUDIO_EXTS for p in [INPUT_DIR / f"{stem}{e}"] if p.exists()), None)
+
+
+def _read_json(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text())
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _save_job(job: Job) -> None:
+    """job.json in the song folder: the library is rebuilt from these on
+    startup, so titles, failures and interrupted runs survive a restart."""
+    d = _output_dir_for(job.song_stem)
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "job.json").write_text(json.dumps({
+            "title": job.name, "url": job.url, "instrument": job.instrument,
+            "options": job.options, "status": job.status, "error": job.error,
+            "detail": job.detail}, indent=2))
+    except OSError as exc:
+        print(f"[band-former] could not save job.json for {job.song_stem}: {exc}")
+
+
+def _tab_state(stem: str) -> tuple[bool, bool]:
+    """(has a tab.json, that tab is from an older pipeline)."""
+    from run_pipeline import PIPELINE_VERSION
+    tab = _output_dir_for(stem) / "tab.json"
+    if not tab.exists():
+        return False, False
+    ver = (_read_json(tab).get("metadata") or {}).get("pipeline_version", 0)
+    return True, ver < PIPELINE_VERSION
+
+
+def _explain(exc: Exception) -> str:
+    """Known failures in one plain sentence; anything else, its last line."""
+    msg = str(exc) or type(exc).__name__
+    low = msg.lower()
+    if "out of memory" in low:
+        return ("The GPU ran out of memory. Close other programs using the GPU "
+                "(games, video players, other AI apps) and press Retry.")
+    if "ffmpeg" in low or "ffprobe" in low:
+        return "ffmpeg is missing or failed. Install ffmpeg, make sure it is on PATH, and press Retry."
+    if isinstance(exc, yt_dlp.utils.DownloadError):
+        return "YouTube download failed: " + _yt_error(exc)
+    return msg.strip().splitlines()[-1]
+
+
+def _enqueue(job: Job, audio_path: Path, options: dict) -> None:
+    with _lock:
+        job.status, job.stage, job.error, job.detail = "queued", "", "", ""
+        job.options = options
+        _jobs[job.id] = job
+    _save_job(job)
+    _queue.put((job.id, audio_path, job.instrument, options))
+
+
+def _idle_job(job_id: str) -> Job:
+    """The job, if it exists and is not being processed right now."""
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "unknown job")
+    if job.status in ("queued", "processing"):
+        raise HTTPException(409, "song is being processed")
+    return job
+
+
 def _seed_existing_jobs() -> None:
-    """Register any already-processed songs (those with a tab.json) as done."""
+    """Rebuild the library from data/output: every song folder is a row.
+
+    job.json (if any) gives the title and last status. A run that was queued
+    or processing when the server stopped becomes an error row with Retry, and
+    so does a folder that never got a tab (an old failed job).
+    """
     if not OUTPUT_DIR.is_dir():
         return
-    from run_pipeline import PIPELINE_VERSION
-    for d in sorted(OUTPUT_DIR.iterdir()):
-        if d.is_dir() and (d / "tab.json").exists():
-            jid = d.name
-            try:
-                ver = json.loads((d / "tab.json").read_text()).get("metadata", {}).get("pipeline_version", 0)
-            except Exception:  # noqa: BLE001
-                ver = 0
-            _jobs[jid] = Job(id=jid, name=d.name, song_stem=d.name, status="done", stage="complete",
-                             outdated=ver < PIPELINE_VERSION)
+    for d in sorted(p for p in OUTPUT_DIR.iterdir() if p.is_dir()):
+        info = _read_json(d / "job.json")
+        has_tab, outdated = _tab_state(d.name)
+        status, error = info.get("status") or ("done" if has_tab else "error"), info.get("error", "")
+        if status in ("queued", "processing"):
+            status, error = "error", "Interrupted: the server stopped while this song was processing."
+        elif status == "done" and not has_tab:
+            status, error = "error", "No tab on disk."
+        elif status == "error" and not error:
+            error = "Processing never finished."
+        _jobs[d.name] = Job(id=d.name, name=info.get("title") or d.name, song_stem=d.name,
+                            status=status, stage="complete" if status == "done" else "",
+                            error=error, detail=info.get("detail", ""), outdated=outdated,
+                            has_tab=has_tab, url=info.get("url", ""),
+                            instrument=info.get("instrument", "guitar"),
+                            options=info.get("options") or {})
 
 
 def _worker() -> None:
-    """Single background worker: processes jobs sequentially, in-process, so the
-    ML models loaded by the pipeline stages stay warm across uploads."""
+    """Single background worker: processes jobs sequentially, in-process."""
     from run_pipeline import process_audio, process_tiles_video, revocals_only
     while True:
         job_id, audio_path, instrument, options = _queue.get()
+        job = _jobs.get(job_id)
+        if job is None:                      # deleted while queued
+            _queue.task_done()
+            continue
         with _lock:
-            _jobs[job_id].status = "processing"
-            _jobs[job_id].stage = "starting"
+            job.status, job.stage, job.started = "processing", "starting", time.time()
+        _save_job(job)
+
         def on_stage(stage_name: str):
             with _lock:
-                _jobs[job_id].stage = stage_name
+                job.stage = stage_name
         try:
+            # YouTube songs download here, not in the HTTP request, so the row
+            # shows progress at once — and a Retry skips what's already on disk.
+            if options.get("url"):
+                if not _source_audio(job.song_stem):
+                    on_stage("Downloading")
+                    audio_path = music_manager.download_youtube(options["url"], job.song_stem)
+                if options.get("tiles") and not Path(options["video_path"]).exists():
+                    on_stage("Downloading video")
+                    music_manager.download_youtube_video(options["url"], job.song_stem)
             if options.get("vocals_only"):
-                revocals_only(_jobs[job_id].song_stem,
-                              vocal_model=options.get("vocal_model", "auto"),
+                revocals_only(job.song_stem, vocal_model=options.get("vocal_model", "auto"),
                               on_stage=on_stage)
             elif options.get("tiles"):
-                process_tiles_video(audio_path, options["video_path"],
-                                    on_stage=on_stage, options=options)
+                process_tiles_video(audio_path, options["video_path"], on_stage=on_stage, options=options)
             else:
                 process_audio(audio_path, instrument, on_stage=on_stage, options=options)
-            tab = _output_dir_for(audio_path.stem) / "tab.json"
-            with _lock:
-                if tab.exists():
-                    _jobs[job_id].status = "done"; _jobs[job_id].stage = "complete"
-                else:
-                    _jobs[job_id].status = "error"; _jobs[job_id].error = "no tab produced"
-        except Exception as exc:
-            with _lock:
-                _jobs[job_id].status = "error"; _jobs[job_id].error = str(exc)[-2000:]
-        finally:
-            _queue.task_done()
+            ok, error, detail = True, "", ""
+        except Exception as exc:  # noqa: BLE001
+            traceback.print_exc()
+            ok, error, detail = False, _explain(exc), traceback.format_exc()[-4000:]
+        has_tab, outdated = _tab_state(job.song_stem)
+        with _lock:
+            job.has_tab, job.outdated = has_tab, outdated
+            if ok and has_tab:
+                job.status, job.stage = "done", "complete"
+            else:
+                job.status, job.error, job.detail = "error", error or "No tab was produced.", detail
+        _save_job(job)
+        _queue.task_done()
 
 
 @app.on_event("startup")
@@ -289,12 +389,9 @@ async def transcribe(
                  str(dest)], capture_output=True)
         if not dest.exists():
             raise HTTPException(400, "Could not extract audio from the video (ffmpeg)")
-        job_id = stem
-        with _lock:
-            _jobs[job_id] = Job(id=job_id, name=stem, song_stem=stem)
-        _queue.put((job_id, dest, instrument, {
-            "run_beats": run_beats, "tiles": True, "video_path": str(video_dest)}))
-        return JSONResponse({"job_id": job_id})
+        _enqueue(Job(id=stem, name=stem, song_stem=stem, instrument="tiles"), dest,
+                 {"run_beats": run_beats, "tiles": True, "video_path": str(video_dest)})
+        return JSONResponse({"job_id": stem})
 
     if suffix not in AUDIO_EXTS:
         raise HTTPException(400, f"Unsupported audio type: {suffix}"
@@ -304,22 +401,14 @@ async def transcribe(
     dest = INPUT_DIR / f"{stem}{suffix}"
     dest.write_bytes(await file.read())
 
-    job_id = stem
+    if stem in _jobs and _jobs[stem].status in ("queued", "processing"):
+        return JSONResponse({"job_id": stem})
     if _processed_instrument(stem) == instrument:   # cached AND same instrument
-        with _lock:
-            if job_id not in _jobs:
-                _jobs[job_id] = Job(id=job_id, name=stem, song_stem=stem, status="done", stage="complete")
-        return JSONResponse({"job_id": job_id})
-
-    with _lock:
-        _jobs[job_id] = Job(id=job_id, name=stem, song_stem=stem)
-    _queue.put((job_id, dest, instrument, {
-        "run_beats": run_beats,
-        "run_vocals": run_vocals,
-        "vocal_model": vocal_model,
-        "separation_quality": separation_quality
-    }))
-    return JSONResponse({"job_id": job_id})
+        return JSONResponse({"job_id": stem})
+    _enqueue(Job(id=stem, name=stem, song_stem=stem, instrument=instrument), dest, {
+        "run_beats": run_beats, "run_vocals": run_vocals,
+        "vocal_model": vocal_model, "separation_quality": separation_quality})
+    return JSONResponse({"job_id": stem})
 
 
 class YouTubeRequest(BaseModel):
@@ -340,33 +429,20 @@ def transcribe_youtube(req: YouTubeRequest) -> JSONResponse:
 
     title = info.get('title') or info.get('id') or "youtube"
     stem = _safe_stem(title)                  # readable, title-based id used everywhere
-    job_id = stem
+    if stem in _jobs and _jobs[stem].status in ("queued", "processing"):
+        return JSONResponse({"job_id": stem})
+    if _processed_instrument(stem) == ("tiles" if req.tiles else req.instrument):
+        return JSONResponse({"job_id": stem})
 
-    if _processed_instrument(stem) == req.instrument:
-        with _lock:
-            if job_id not in _jobs:
-                _jobs[job_id] = Job(id=job_id, name=title, song_stem=stem, status="done", stage="complete")
-        return JSONResponse({"job_id": job_id})
-
-    try:
-        dest = music_manager.download_youtube(req.url, stem)
-        video_path = music_manager.download_youtube_video(req.url, stem) if req.tiles else None
-    except Exception as e:
-        raise HTTPException(500, f"Download failed: {_yt_error(e)}")
-
-    job = Job(id=job_id, name=title, song_stem=stem)
-    with _lock:
-        _jobs[job_id] = job
-
-    _queue.put((job_id, dest, req.instrument, {
-        "run_beats": req.run_beats,
-        "run_vocals": req.run_vocals,
-        "vocal_model": req.vocal_model,
-        "separation_quality": req.separation_quality,
-        "tiles": req.tiles,
-        "video_path": str(video_path) if video_path else ""
-    }))
-    return JSONResponse({"job_id": job_id})
+    # The download itself is the job's first stage (see _worker).
+    video = INPUT_DIR.parent / "video" / f"{stem}.mp4"
+    _enqueue(Job(id=stem, name=title, song_stem=stem, url=req.url,
+                 instrument="tiles" if req.tiles else req.instrument),
+             INPUT_DIR / f"{stem}.mp3", {
+                 "url": req.url, "run_beats": req.run_beats, "run_vocals": req.run_vocals,
+                 "vocal_model": req.vocal_model, "separation_quality": req.separation_quality,
+                 "tiles": req.tiles, "video_path": str(video) if req.tiles else ""})
+    return JSONResponse({"job_id": stem})
 
 
 class ReprocessRequest(BaseModel):
@@ -383,32 +459,17 @@ class RevocalsRequest(BaseModel):
 @app.post("/api/revocals/{job_id}")
 def revocals_job(job_id: str, req: RevocalsRequest) -> JSONResponse:
     """Re-extract just the vocals with a chosen model — quick background job."""
-    job = _jobs.get(job_id)
-    if not job:
-        raise HTTPException(404, "unknown job")
-    with _lock:
-        job.status = "queued"
-        job.stage = "starting"
-        job.error = ""
-    _queue.put((job_id, INPUT_DIR / f"{job_id}.mp3", "",
-                {"vocals_only": True, "vocal_model": req.vocal_model}))
+    job = _idle_job(job_id)
+    _enqueue(job, INPUT_DIR / f"{job.song_stem}.mp3",
+             {"vocals_only": True, "vocal_model": req.vocal_model})
     return JSONResponse({"job_id": job_id})
 
 
 @app.post("/api/reprocess/{job_id}")
 def reprocess_job(job_id: str, req: ReprocessRequest) -> JSONResponse:
-    job = _jobs.get(job_id)
-    if not job:
-        raise HTTPException(404, "unknown job")
-    
-    with _lock:
-        job.status = "queued"
-        job.stage = "starting"
-        job.error = ""
-        
-    src = _find_source_audio(job.song_stem)
-    audio_path = src if src else (INPUT_DIR / f"{job_id}.mp3")
-    stored = _processed_instrument(job.song_stem) or "guitar"
+    job = _idle_job(job_id)
+    audio_path = _source_audio(job.song_stem) or (INPUT_DIR / f"{job.song_stem}.mp3")
+    stored = _processed_instrument(job.song_stem) or job.instrument or "guitar"
 
     # Tiles songs re-run the VIDEO pipeline (e.g. after changing tiles knobs
     # in tuning.json) — the audio path would look for stems that don't exist.
@@ -417,30 +478,32 @@ def reprocess_job(job_id: str, req: ReprocessRequest) -> JSONResponse:
         video = next((p for ext in (".mp4", ".webm", ".mkv", ".mov")
                       for p in [vdir / f"{job.song_stem}{ext}"] if p.exists()), None)
         if video is None:
-            with _lock:
-                job.status = "error"; job.error = "tiles video file missing — re-add the song"
-            raise HTTPException(404, "video file for this tiles song is gone")
-        _queue.put((job_id, audio_path, "tiles", {
-            "tiles": True, "video_path": str(video),
-            "reprocess": True, "run_beats": req.run_beats,
-        }))
+            raise HTTPException(404, "the video file for this tiles song is gone — add the song again")
+        job.instrument = "tiles"
+        _enqueue(job, audio_path, {"tiles": True, "video_path": str(video),
+                                   "reprocess": True, "run_beats": req.run_beats})
         return JSONResponse({"job_id": job_id})
 
     instrument = req.instrument or stored
-    retranscribe = instrument != stored   # different stem → notes must be redone
+    job.instrument = instrument
+    _enqueue(job, audio_path, {
+        "run_beats": req.run_beats, "run_vocals": req.run_vocals,
+        "vocal_model": req.vocal_model, "reprocess": True,
+        "retranscribe": instrument != stored})   # different stem -> notes must be redone
+    return JSONResponse({"job_id": job_id})
 
-    _queue.put((
-        job_id,
-        audio_path,
-        instrument,
-        {
-            "run_beats": req.run_beats,
-            "run_vocals": req.run_vocals,
-            "vocal_model": req.vocal_model,
-            "reprocess": True,
-            "retranscribe": retranscribe
-        }
-    ))
+
+@app.post("/api/retry/{job_id}")
+def retry_job(job_id: str) -> JSONResponse:
+    """Run a failed or interrupted job again with the options it had."""
+    job = _idle_job(job_id)
+    options = dict(job.options)
+    if job.url and not options.get("url"):
+        options["url"] = job.url
+    audio_path = _source_audio(job.song_stem) or (INPUT_DIR / f"{job.song_stem}.mp3")
+    if not options.get("url") and not audio_path.exists():
+        raise HTTPException(404, "the original audio is gone — add the song again")
+    _enqueue(job, audio_path, options)
     return JSONResponse({"job_id": job_id})
 
 
@@ -588,15 +651,14 @@ class RenameRequest(BaseModel):
 
 @app.post("/api/rename/{job_id}")
 def rename_job(job_id: str, req: RenameRequest) -> dict:
-    job = _jobs.get(job_id)
-    if not job:
-        raise HTTPException(404, "unknown job")
+    job = _idle_job(job_id)
     new_stem = _safe_stem(req.name)
     if not new_stem:
         raise HTTPException(400, "invalid name")
     if new_stem == job.song_stem:
         with _lock:
             job.name = req.name
+        _save_job(job)
         return {"ok": True, "job_id": job_id}
     if (OUTPUT_DIR / new_stem).exists() or any((INPUT_DIR / f"{new_stem}{e}").exists() for e in AUDIO_EXTS):
         raise HTTPException(409, "a song with that name already exists")
@@ -616,16 +678,15 @@ def rename_job(job_id: str, req: RenameRequest) -> dict:
 
     with _lock:
         _jobs.pop(job_id, None)
-        _jobs[new_stem] = Job(id=new_stem, name=req.name, song_stem=new_stem,
-                              status=job.status, stage=job.stage)
+        job.id, job.name, job.song_stem = new_stem, req.name, new_stem
+        _jobs[new_stem] = job
+    _save_job(job)
     return {"ok": True, "job_id": new_stem}
 
 
 @app.delete("/api/jobs/{job_id}")
 def delete_job(job_id: str) -> dict:
-    job = _jobs.get(job_id)
-    if not job:
-        raise HTTPException(404, "unknown job")
+    job = _idle_job(job_id)
     with _lock:                                   # drop from the list first
         _jobs.pop(job_id, None)
     err = None

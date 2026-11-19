@@ -158,110 +158,121 @@
     $("status").textContent = "";
   }
 
-  // ── Overlay ───────────────────────────────────────────────────────────────
-  // The step list depends on which pipeline is running: tiles videos read notes
-  // from the video and never separate or transcribe. Each entry is
-  // [stage prefix reported by the backend, label].
-  const FLOWS = {
-    audio: [["starting", "Initializing"], ["Separating stems", "Separating stems"], ["Tracking beats", "Tracking beats"],
-            ["Transcribing notes", "Transcribing notes"], ["Building tab", "Building tab"], ["Arranging", "Arranging"],
-            ["Extracting vocals", "Extracting vocals"]],
-    tiles: [["starting", "Initializing"], ["Reading tiles video", "Reading tiles video"], ["Tracking beats", "Tracking beats"],
-            ["Building tab", "Building tab"], ["Arranging", "Arranging"]],
-  };
-  // Stages the backend reports that stand in for a listed step.
-  const STEP_ALIAS = { "Skipping separation": "Separating stems" };
-  let stepFlow = "audio", overlayT0 = 0;
-
-  function setStepFlow(flow) {
-    if (flow === stepFlow && $("progressSteps").children.length) return;
-    stepFlow = flow;
-    $("progressSteps").innerHTML = FLOWS[flow].map(([step, label]) =>
-      `<div class="pStep" data-step="${step}"><span class="stepDot"></span><span class="stepLabel">${label}</span></div>`).join("");
-  }
-  function showOverlay(msg, sub, stg) {
-    const ov = $("overlay");
-    if (ov.classList.contains("hidden")) overlayT0 = Date.now();
-    ov.classList.remove("hidden");
-    $("overlayMsg").textContent = msg;
-    $("overlaySub").textContent = sub || "";
-    updateSteps(stg);
-  }
-  function updateSteps(currentStage) {
-    const stage = STEP_ALIAS[currentStage] || currentStage || "";
-    // "Reading tiles video" is reported only by the tiles pipeline, so it also
-    // covers reprocesses, where the UI never knew the job's kind.
-    if (stage.startsWith("Reading tiles video")) setStepFlow("tiles");
-    else if (["Separating stems", "Transcribing notes", "Extracting vocals"].some((s) => stage.startsWith(s))) setStepFlow("audio");
-    const order = FLOWS[stepFlow].map(([s]) => s);
-    // Prefix match: two-stage separation reports "Separating stems (1/2 — …)"
-    // etc. — those still light up the "Separating stems" step.
-    const idx = order.findIndex((s) => stage.startsWith(s));
-    document.querySelectorAll(".pStep").forEach((el) => {
-      const stepIdx = order.indexOf(el.dataset.step);
-      el.classList.remove("done", "active");
-      if (idx < 0) return;
-      if (stepIdx < idx) el.classList.add("done");
-      else if (stepIdx === idx) el.classList.add("active");
-    });
-  }
-  const hideOverlay = () => { $("overlay").classList.add("hidden"); overlayT0 = 0; };
-  const elapsedStr = () => { const e = overlayT0 ? Math.floor((Date.now() - overlayT0) / 1000) : 0; return Math.floor(e / 60) + ":" + String(e % 60).padStart(2, "0"); };
-
   // ── Library sidebar ───────────────────────────────────────────────────────
+  // Progress lives on each song's row (stage + elapsed time), so the app stays
+  // usable while a song processes. One watcher polls /api/jobs while anything
+  // is queued or processing; a reload picks it straight back up.
+  let jobsById = {};
+  let settingsReprocessJobId = null;   // set by a row's Reprocess button
+  const onDone = new Map();   // job id -> what to do when it finishes (load it, refresh vocals…)
+  let watching = false;
+
+  const busy = (j) => j.status === "queued" || j.status === "processing";
+  const clock = (sec) => { sec = Math.max(0, Math.floor(sec)); return Math.floor(sec / 60) + ":" + String(sec % 60).padStart(2, "0"); };
+  function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+
   async function getJobs() { return (await (await fetch("/api/jobs")).json()).jobs; }
+  async function refreshJobs() {
+    const jobs = await getJobs();
+    jobsById = Object.fromEntries(jobs.map((j) => [j.id, j]));
+    renderSongList(jobs);
+    if (jobs.some(busy)) watch();
+    return jobs;
+  }
+  function watch(id, then) {
+    if (id) onDone.set(id, then || (() => loadJob(id)));
+    if (watching) return;
+    watching = true;
+    const tick = async () => {
+      let jobs;
+      try { jobs = await getJobs(); } catch (e) { setTimeout(tick, 2000); return; }   // transient blip
+      const before = jobsById;
+      jobsById = Object.fromEntries(jobs.map((j) => [j.id, j]));
+      renderSongList(jobs);
+      for (const [jid, fn] of [...onDone]) {
+        const j = jobsById[jid];
+        if (!j) { onDone.delete(jid); continue; }
+        if (busy(j)) continue;
+        onDone.delete(jid);
+        if (j.status === "done") fn();
+        else $("status").textContent = "⚠ " + j.name + ": " + j.error;
+      }
+      // A reprocess of the song on screen finished without anyone waiting on it.
+      const cur = curJob && jobsById[curJob], was = curJob && before[curJob];
+      if (cur && was && busy(was) && cur.status === "done" && !onDone.has(curJob)) loadJob(curJob);
+      if (jobs.some(busy)) setTimeout(tick, 1000); else watching = false;
+    };
+    setTimeout(tick, 300);
+  }
+
+  async function post(url, body) {
+    const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+    let d = {}; try { d = await r.json(); } catch (e) {}
+    if (!r.ok) throw new Error(d.detail || ("HTTP " + r.status));
+    return d;
+  }
 
   function renderSongList(jobs) {
     const list = $("songList"); list.innerHTML = "";
     if (!jobs.length) {
-      list.innerHTML = "<p class='muted' style='padding:0 8px;color:var(--muted);font-size:12.5px'>No songs yet — paste a YouTube link or upload a file above.</p>";
+      list.appendChild(el("p", "muted libEmpty", "No songs yet — paste a YouTube link or upload a file above."));
       return;
     }
     for (const j of jobs) {
-      const row = document.createElement("div");
-      row.className = "songRow " + j.status + (j.id === curJob ? " active" : "");
-      row.innerHTML = `<span class="songDot"></span><span class="songName" title="${j.name}">${j.name}</span>`
-        + (j.outdated ? `<span class="badge" title="Processed by an older pipeline — reprocess for the current chords and tab">outdated</span>` : "");
-      row.onclick = () => { if (j.status === "done") loadJob(j.id); };
-
-      const acts = document.createElement("div"); acts.className = "songActs";
-      const rn = document.createElement("button"); rn.textContent = "✎"; rn.title = "Rename";
-      rn.onclick = async (e) => {
-        e.stopPropagation();
-        const name = prompt("Rename song to:", j.name);
-        if (!name || name.trim() === j.name) return;
-        const r = await fetch(`/api/rename/${j.id}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: name.trim() }) });
-        if (!r.ok) { let d = ""; try { d = (await r.json()).detail; } catch (e2) {} $("status").textContent = "Rename failed: " + (d || r.status); return; }
-        refreshJobs();
-      };
-      const rp = document.createElement("button"); rp.textContent = "⟳"; rp.title = "Reprocess";
-      rp.onclick = (e) => {
-        e.stopPropagation();
-        settingsReprocessJobId = j.id;
-        $("runSettingsBtn").textContent = "Apply & Reprocess";
-        $("settingsModal").classList.remove("hidden");
-      };
-      const del = document.createElement("button"); del.textContent = "✕"; del.title = "Delete"; del.className = "danger";
-      del.onclick = async (e) => {
-        e.stopPropagation();
-        del.disabled = true;
-        try {
-          const r = await fetch(`/api/jobs/${j.id}`, { method: "DELETE" });
-          const d = await r.json().catch(() => ({}));
-          if (!r.ok) throw new Error(d.detail || ("HTTP " + r.status));
-          if (d.still_exists) throw new Error("files in use — close players and retry");
-          row.remove();
-        } catch (err) {
-          del.disabled = false;
-          $("status").textContent = "Delete failed: " + err.message;
-        }
-      };
-      acts.append(rn, rp, del);
-      row.appendChild(acts);
+      const row = el("div", "songRow " + j.status + (j.id === curJob ? " active" : "") + (j.has_tab ? "" : " noTab"));
+      const text = el("div", "songText");
+      const name = el("span", "songName", j.name); name.title = j.name;
+      text.appendChild(name);
+      const sub = j.status === "processing" ? `${j.stage || "Starting"} · ${clock(Date.now() / 1000 - j.started)}`
+                : j.status === "queued" ? "Waiting in queue"
+                : j.status === "error" ? j.error : "";
+      if (sub) { const se = el("span", "songSub", sub); if (j.detail) se.title = j.detail; text.appendChild(se); }
+      row.append(el("span", "songDot"), text);
+      if (j.outdated && !busy(j)) {
+        const b = el("span", "badge", "outdated");
+        b.title = "Processed by an older version of the pipeline — Reprocess for the current chords and tab";
+        row.appendChild(b);
+      }
+      row.onclick = () => { if (j.has_tab && !busy(j)) loadJob(j.id); };
+      if (!busy(j)) row.appendChild(songActions(j, row));
       list.appendChild(row);
     }
   }
-  async function refreshJobs() { const jobs = await getJobs(); renderSongList(jobs); return jobs; }
+
+  function songActions(j, row) {
+    const acts = el("div", "songActs");
+    const btn = (label, title, fn, cls) => {
+      const b = el("button", cls || "", label); b.title = title;
+      b.onclick = async (e) => {
+        e.stopPropagation(); b.disabled = true;
+        try { await fn(); } catch (err) { $("status").textContent = title + " failed: " + err.message; }
+        b.disabled = false;
+      };
+      acts.appendChild(b);
+    };
+    if (j.status === "error") btn("Retry", "Retry", async () => { await post(`/api/retry/${j.id}`); watch(j.id); refreshJobs(); });
+    btn("✎", "Rename", async () => {
+      const name = prompt("Rename song to:", j.name);
+      if (!name || name.trim() === j.name) return;
+      const d = await post(`/api/rename/${j.id}`, { name: name.trim() });
+      if (curJob === j.id) curJob = d.job_id;
+      refreshJobs();
+    });
+    if (j.has_tab) btn("⟳", "Reprocess", async () => {
+      settingsReprocessJobId = j.id;
+      $("runSettingsBtn").textContent = "Apply & Reprocess";
+      $("settingsModal").classList.remove("hidden");
+    });
+    btn("✕", "Delete", async () => {
+      if (!confirm(`Delete "${j.name}"? Its stems and tab are removed from disk.`)) return;
+      const r = await fetch(`/api/jobs/${j.id}`, { method: "DELETE" });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.detail || ("HTTP " + r.status));
+      if (d.still_exists) throw new Error("files in use — close players and retry");
+      row.remove();
+    }, "danger");
+    return acts;
+  }
 
   async function loadJob(id) {
     pause(); paused = 0; loopA = loopB = null; $("loopBtn").classList.remove("on"); $("loopBtn").textContent = "Loop";
@@ -291,8 +302,9 @@
     const m = tab.metadata || {};
     const last = allNotes.length ? allNotes[allNotes.length - 1] : null;
     duration = m.duration_sec || (last ? last.start + last.duration : 0);
-    $("songTitle").textContent = id;
-    $("songTitle").title = id;
+    const name = (jobsById[id] || {}).name || id;
+    $("songTitle").textContent = name;
+    $("songTitle").title = name;
     $("keyBadge").textContent = "key " + keyName(m.key);
     $("bpmBadge").textContent = (m.bpm ? Number(m.bpm).toFixed(0) : "—") + " bpm";
     const diff = (analysis.difficulty || {}).overall;
@@ -312,10 +324,9 @@
     $("playBtn").disabled = false;
     buildOverview(); buildChordGrid(); buildLearn();
     setView("overview");
-    $("status").textContent = m.warning ? "⚠ " + m.warning : "";
+    $("status").textContent = [m.warning, ...(m.warnings || [])].filter(Boolean).map((w) => "⚠ " + w).join("  ·  ");
     dirty = true;
     refreshJobs();
-    hideOverlay();
   }
 
   function fillCapoSelect() {
@@ -335,8 +346,7 @@
   // ── Add: upload / youtube ─────────────────────────────────────────────────
   $("fileInput").addEventListener("change", async (e) => {
     const f = e.target.files[0]; if (!f) return;
-    setStepFlow($("tilesChk").checked ? "tiles" : "audio");
-    showOverlay("Uploading…", f.name);
+    $("status").textContent = "Uploading " + f.name + "…";
     const fd = new FormData(); fd.append("file", f); fd.append("instrument", $("instSel").value);
     fd.append("run_beats", $("optBeats").checked);
     fd.append("run_vocals", $("optVocals").checked);
@@ -345,41 +355,34 @@
     fd.append("tiles", $("tilesChk").checked);
     const r = await fetch("/api/transcribe", { method: "POST", body: fd });
     e.target.value = "";
-    if (!r.ok) { showOverlay("Upload failed", await r.text()); return; }
-    refreshJobs();
-    poll((await r.json()).job_id);
+    if (!r.ok) { let d = ""; try { d = (await r.json()).detail; } catch (e2) {} $("status").textContent = "Upload failed: " + (d || r.status); return; }
+    $("status").textContent = "";
+    added((await r.json()).job_id);
   });
   $("ytBtn").addEventListener("click", async () => {
     const url = $("ytInput").value.trim(); if (!url) return;
-    setStepFlow($("tilesChk").checked ? "tiles" : "audio");
-    showOverlay("Fetching from YouTube…", url);
-    const r = await fetch("/api/transcribe/youtube", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+    $("status").textContent = "Looking up the video…";
+    try {
+      const d = await post("/api/transcribe/youtube", {
         url,
         instrument: $("instSel").value,
         run_beats: $("optBeats").checked,
         run_vocals: $("optVocals").checked,
         vocal_model: $("optVocalModel").value,
         separation_quality: $("optSep").value,
-        tiles: $("tilesChk").checked
-      }),
-    });
-    if (!r.ok) { let d = ""; try { d = (await r.json()).detail; } catch (e) {} showOverlay("YouTube failed", d || `HTTP ${r.status}`); return; }
-    $("ytInput").value = "";
-    refreshJobs();
-    poll((await r.json()).job_id);
+        tiles: $("tilesChk").checked,
+      });
+      $("ytInput").value = ""; $("status").textContent = "";
+      added(d.job_id);
+    } catch (err) { $("status").textContent = "YouTube failed: " + err.message; }
   });
-
-  async function poll(id) {
-    let s;
-    try { s = await (await fetch(`/api/status/${id}`)).json(); }
-    catch (e) { setTimeout(() => poll(id), 2000); return; }   // transient blip — keep polling
-    if (s.status === "done") { hideOverlay(); await refreshJobs(); return loadJob(id); }
-    if (s.status === "error") { showOverlay("Processing failed", (s.error || "").split("\n").filter(Boolean).pop() || "unknown error"); return; }
-    const stg = s.stage || "starting";
-    const hint = (stg === "Separating stems" || stg === "Transcribing notes") ? " · this stage is the slow one" : "";
-    showOverlay("Processing  " + elapsedStr(), stg + " · first run only (cached after)" + hint, stg);
-    setTimeout(() => poll(id), 1000);
+  // A new song: if it's already processed, open it; otherwise open it the
+  // moment it finishes — unless you've started playing something else.
+  async function added(id) {
+    const jobs = await refreshJobs();
+    const j = jobs.find((x) => x.id === id);
+    if (j && j.status === "done") return loadJob(id);
+    watch(id, () => { if (!curJob || !playing) loadJob(id); });
   }
 
   // ── Chord diagram (SVG) ───────────────────────────────────────────────────
@@ -465,7 +468,7 @@
     el.innerHTML = `
       <div class="ovGrid">
         <section class="card">
-          <div class="ovBig">${curJob || ""}</div>
+          <div class="ovBig"></div>
           <div class="ovStats">
             <div class="ovStat"><b>${keyName(m.key)}</b><span>key</span></div>
             <div class="ovStat"><b>${m.bpm ? Number(m.bpm).toFixed(0) : "—"}</b><span>bpm</span></div>
@@ -1077,7 +1080,6 @@
   };
 
   // settings modal
-  let settingsReprocessJobId = null;
   $("settingsBtn").onclick = () => {
     settingsReprocessJobId = null;
     $("runSettingsBtn").textContent = "Save (applies to next add)";
@@ -1088,28 +1090,23 @@
 
   $("runSettingsBtn").onclick = async () => {
     $("settingsModal").classList.add("hidden");
-    if (settingsReprocessJobId) {
-      showOverlay("Reprocessing…", "");
-      const r = await fetch(`/api/reprocess/${settingsReprocessJobId}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          run_beats: $("optBeats").checked,
-          run_vocals: $("optVocals").checked,
-          vocal_model: $("optVocalModel").value,
-          // "" = keep the song's stored instrument. The sidebar dropdown is
-          // NOT used here — it's for new adds and would silently force a
-          // re-transcription on every reprocess.
-          instrument: $("optInst").value
-        })
-      });
-      if (!r.ok) {
-        let d = ""; try { d = (await r.json()).detail; } catch (e) {}
-        showOverlay("Reprocess failed", d || `HTTP ${r.status}`); return;
-      }
-      poll(settingsReprocessJobId);
-    }
+    if (settingsReprocessJobId) reprocess(settingsReprocessJobId, {
+      run_beats: $("optBeats").checked,
+      run_vocals: $("optVocals").checked,
+      vocal_model: $("optVocalModel").value,
+      // "" = keep the song's stored instrument. The sidebar dropdown is NOT
+      // used here — it's for new adds and would silently force a
+      // re-transcription on every reprocess.
+      instrument: $("optInst").value,
+    });
   };
+
+  async function reprocess(id, body) {
+    try { await post(`/api/reprocess/${id}`, body); }
+    catch (err) { $("status").textContent = "Reprocess failed: " + err.message; return; }
+    watch(id, () => loadJob(id));
+    refreshJobs();
+  }
 
   $("redoVocalsBtn").onclick = async () => {
     const id = settingsReprocessJobId || curJob;
@@ -1121,29 +1118,19 @@
     });
     if (!r.ok) { $("status").textContent = "Vocals redo failed to start"; return; }
     $("status").textContent = "Redoing vocals in the background…";
-    // quiet poll — no overlay, keep playing; reload data when done
-    const tick = async () => {
-      let s;
-      try { s = await (await fetch(`/api/status/${id}`)).json(); }
-      catch (e) { setTimeout(tick, 3000); return; }
-      if (s.status === "done") {
-        $("status").textContent = "";
-        if (curJob === id) {                       // refresh vocals without touching playback
-          const rr = await fetch(`/api/result/${id}`);
-          if (rr.ok) {
-            const t2 = await rr.json();
-            vocals = (t2.vocals || []).slice().sort((a, b) => a.start - b.start);
-            vpitch = t2.vocal_pitch || [];
-            if (vocals.length) { const ps = vocals.map((n) => n.pitch); vlo = Math.min(...ps) - 3; vhi = Math.max(...ps) + 3; }
-            $("viewSeg").querySelector('[data-view=vocals]').style.display = (vocals.length || vpitch.length) ? "" : "none";
-            dirty = true;
-          }
-        }
-      } else if (s.status === "error") {
-        $("status").textContent = "Vocals redo failed: " + ((s.error || "").split("\n").pop() || "");
-      } else setTimeout(tick, 2500);
-    };
-    setTimeout(tick, 2500);
+    watch(id, async () => {                       // refresh vocals without touching playback
+      $("status").textContent = "";
+      if (curJob !== id) return;
+      const rr = await fetch(`/api/result/${id}`);
+      if (!rr.ok) return;
+      const t2 = await rr.json();
+      vocals = (t2.vocals || []).slice().sort((a, b) => a.start - b.start);
+      vpitch = t2.vocal_pitch || [];
+      if (vocals.length) { const ps = vocals.map((n) => n.pitch); vlo = Math.min(...ps) - 3; vhi = Math.max(...ps) + 3; }
+      $("viewSeg").querySelector('[data-view=vocals]').style.display = (vocals.length || vpitch.length) ? "" : "none";
+      dirty = true;
+    });
+    refreshJobs();
   };
 
   // Processing options are per-browser preferences, so remember them — picking
@@ -1283,13 +1270,7 @@
     if (!(await saveTuning())) return;
     $("tuningModal").classList.add("hidden");
     if (!curJob) { $("status").textContent = "Saved. Load a song to hear it applied."; return; }
-    showOverlay("Reprocessing with new tuning…", "");
-    const r = await fetch(`/api/reprocess/${curJob}`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ run_beats: true, run_vocals: true, vocal_model: $("optVocalModel").value }),
-    });
-    if (!r.ok) { let dd = ""; try { dd = (await r.json()).detail; } catch (e) {} showOverlay("Reprocess failed", dd || `HTTP ${r.status}`); return; }
-    poll(curJob);
+    reprocess(curJob, { run_beats: true, run_vocals: true, vocal_model: $("optVocalModel").value });
   };
 
   document.addEventListener("keydown", (e) => {

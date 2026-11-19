@@ -1,11 +1,10 @@
 """Chord cleanup: key, simple level, flicker removal, capo, display names.
 
-Not wired in yet. FIXES.md fix 1 says how. Tested on five songs (results in FIXES.md).
+Called from arrange.arrange(); results on five songs are in FIXES.md fix 1.
 """
-from arrange import NOTE_PC, PC_NOTE, OPEN_SHAPES, SHAPES, _parse
-
-# ── Chord cleanup: key, simple level, flicker removal, capo, display names ────
 from collections import defaultdict
+
+from arrange import PC_NOTE, OPEN_SHAPES, _parse
 
 _MAJ_DEG, _MAJ_Q = (0, 2, 4, 5, 7, 9, 11), ("maj", "min", "min", "maj", "maj", "min", "dim")
 _MIN_DEG, _MIN_Q = (0, 2, 3, 5, 7, 8, 10), ("min", "dim", "maj", "min", "min", "maj", "maj")
