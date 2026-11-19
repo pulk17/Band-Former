@@ -27,7 +27,7 @@ from pipeline import (
 
 # Bump whenever a change alters what ends up in tab.json, so the library can
 # flag songs processed by an older pipeline as outdated.
-PIPELINE_VERSION = 3
+PIPELINE_VERSION = 4
 
 _NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 

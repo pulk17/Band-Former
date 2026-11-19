@@ -591,10 +591,12 @@ def set_tuning(body: dict) -> JSONResponse:
 
 @app.get("/api/shapes")
 def shapes() -> dict:
-    """Chord shape tables for the UI's diagrams, straight from arrange.py."""
-    from arrange import SHAPES, OPEN_SHAPES
-    return {"barre": SHAPES,
-            "open": {f"{pc}|{q}": [nm, frets] for (pc, q), (nm, frets) in OPEN_SHAPES.items()}}
+    """Every chord diagram the UI draws, keyed "<root relative to the capo>|<quality>".
+
+    Computed by arrange.voicing, so the diagrams are exactly what the pipeline
+    voices — the UI keeps no shape logic of its own to drift out of sync."""
+    from arrange import SHAPES, voicing
+    return {"voicings": {f"{t}|{q}": voicing(t, q) for t in range(12) for q in SHAPES}}
 
 
 @app.get("/api/jobs")

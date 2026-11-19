@@ -68,6 +68,10 @@ OPEN_SHAPES = {
     (4, "6"): ("E6", [0, 2, 2, 1, 2, 0]), (7, "6"): ("G6", [3, 2, 0, 0, 0, 0]),
     (9, "6"): ("A6", [-1, 0, 2, 2, 2, 2]),
     (2, "sus2"): ("Dsus2", [-1, -1, 0, 2, 3, 0]), (9, "sus2"): ("Asus2", [-1, 0, 2, 2, 0, 0]),
+    # Open-A forms of the colour chords: barred up the neck they give every
+    # dim/aug/m7b5 an A-shape option, so none lands above fret 7.
+    (9, "dim"): ("Adim", [-1, 0, 1, 2, 1, -1]), (9, "aug"): ("Aaug", [-1, 0, 3, 2, 2, -1]),
+    (9, "m7b5"): ("Am7b5", [-1, 0, 1, 0, 1, -1]),
 }
 
 try:
@@ -105,10 +109,18 @@ def _parse(name: str):
 
 
 def barre_voicing(root_pc: int, qual: str, capo: int = 0) -> dict:
-    """Movable E-shape voicing relative to the capo (baseFret is above the capo)."""
+    """Movable barre voicing relative to the capo (baseFret is above the capo).
+
+    Either the E-shape (root on the low E string) or the A-shape (root on the
+    A string, the open-A chord moved up), whichever sits lower on the neck:
+    Bm is x24432 at fret 2, not the E-shape up at fret 7.
+    """
     t = (root_pc - capo) % 12
-    base = (t - 4) % 12
-    frets = [(-1 if v < 0 else v + base) for v in SHAPES[qual]]
+    options = [((t - 4) % 12, SHAPES[qual])]
+    if (9, qual) in OPEN_SHAPES:
+        options.append(((t - 9) % 12, OPEN_SHAPES[(9, qual)][1]))
+    base, shape = min(options, key=lambda o: o[0])
+    frets = [(-1 if v < 0 else v + base) for v in shape]
     return {"name": PC_NOTE[t] + ("m" if qual == "min" else "" if qual == "maj" else qual),
             "frets": frets, "baseFret": base, "open": False}
 

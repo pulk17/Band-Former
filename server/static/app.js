@@ -22,18 +22,16 @@
   const PC_NOTE = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
   // Shape tables come from arrange.py via /api/shapes (loaded in init), so
   // the diagrams can never drift from what the pipeline voices.
-  let BARRE = {}, OPEN = {};
+  let VOICE = {};
   function jsVoicing(name, c) {
     if (!name || !name.includes(":")) return null;
     const root = name.split(":")[0];
     const qual = name.split(":")[1].split("/")[0];   // "G:maj/B" → G major shape
-    if (!(root in NOTE_PC) || !(qual in BARRE)) return null;
-    const t = ((NOTE_PC[root] - c) % 12 + 12) % 12;
-    const o = OPEN[t + "|" + qual];
-    if (o) return { name: o[0], frets: o[1], baseFret: 0, open: true };
-    const base = ((t - 4) % 12 + 12) % 12;
-    return { name: displayName(PC_NOTE[t] + ":" + qual),
-             frets: BARRE[qual].map((v) => v < 0 ? -1 : v + base), baseFret: base, open: false };
+    if (!(root in NOTE_PC)) return null;
+    const t = ((NOTE_PC[root] - c) % 12 + 12) % 12;   // the shape you finger above the capo
+    const v = VOICE[t + "|" + qual];
+    if (!v) return null;
+    return v.open ? v : { ...v, name: displayName(PC_NOTE[t] + ":" + qual) };
   }
   const voicingOf = (c) => jsVoicing(c.name, capo);
   // Internal names stay "C#:min7"; people read "C#m7", or "Dbm7" in a flat key.
@@ -1240,9 +1238,9 @@
   async function init() {
     try {
       const r = await fetch("/api/shapes");
-      if (r.ok) { const sh = await r.json(); BARRE = sh.barre || {}; OPEN = sh.open || {}; }
+      if (r.ok) VOICE = (await r.json()).voicings || {};
     } catch (e) {}
-    if (!Object.keys(BARRE).length) $("status").textContent = "Restart the server to load chord diagrams.";
+    if (!Object.keys(VOICE).length) $("status").textContent = "Restart the server to load chord diagrams.";
     watchCanvas(stage); watchCanvas(vocalStage); watchCanvas(rollStage); watchCanvas(wave);
     requestAnimationFrame(frame);
     const jobs = await refreshJobs();
