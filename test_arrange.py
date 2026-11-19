@@ -21,3 +21,15 @@ def test_every_voicing_plays_the_chord_low_on_the_neck():
             assert v["baseFret"] <= 7, (PC_NOTE[t], qual, v)
     assert voicing(11, "min")["frets"] == [-1, 2, 4, 4, 3, 2]     # Bm: A-shape at fret 2
     assert voicing(5, "maj")["frets"] == [1, 3, 3, 2, 1, 1]       # F: E-shape at fret 1
+
+
+def test_half_bar_chords_survive_the_simple_level():
+    # where_is_my_mind: E C#m G# A, two beats each, measured 1.9 or 2.1 beats
+    from chords_cleanup import simple_chords
+    names = ["E:maj", "C#:min", "G#:maj", "A:maj"] * 8
+    beat, t, chords = 0.74, 0.0, []
+    for i, n in enumerate(names):
+        d = beat * (1.9 if i % 2 else 2.1)
+        chords.append({"start": t, "end": t + d, "name": n})
+        t += d
+    assert [c["name"] for c in simple_chords(chords, (1, False), beat)] == names

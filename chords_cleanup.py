@@ -122,7 +122,8 @@ def simple_chords(chords, key, beat_len):
        the key expects, else major.
     2. A root heard as both major and minor keeps only the key's version, unless
        the other one is used at least twice as much (a real borrowed chord).
-    3. Flicker under 2 beats is absorbed by a neighbour.
+    3. Flicker under 1.5 beats is absorbed by a neighbour. Not 2: a chord
+       held for half a bar measures 1.9 beats as often as 2.1.
     4. A chord that is out of key and fills under 3% of the song, or that occurs
        once for under a bar, is absorbed too.
     """
@@ -157,7 +158,7 @@ def simple_chords(chords, key, beat_len):
             out.append({"start": c["start"], "end": c["end"],
                         "name": f"{PC_NOTE[p[0]]}:{triad(*p)}",
                         "confidence": c.get("confidence", 0.0)})
-    out = tidy_chords(out, beat_len, 2.0)
+    out = tidy_chords(out, beat_len, 1.5)
 
     total = sum(c["end"] - c["start"] for c in out) or 1.0
     seconds, count = defaultdict(float), defaultdict(int)
@@ -171,7 +172,7 @@ def simple_chords(chords, key, beat_len):
         one_off = count[name] == 1 and sec < 4 * beat_len
         if rare or one_off:
             absorb.add(name)
-    return tidy_chords(out, beat_len, 2.0, absorb)
+    return tidy_chords(out, beat_len, 1.5, absorb)
 
 
 def pick_capo(chords):

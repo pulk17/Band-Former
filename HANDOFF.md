@@ -26,9 +26,8 @@ AUDIO SONGS:
  input audio ─► separation (audio-separator: BS-Roformer → htdemucs_6s stems)
    ├► beats     (beat_this)                          → beats.json
    ├► notes     (YourMT3 via mt3-infer; piano stems → bytedance model) → notes.json
-   ├► chords    (C++ tab_engine: tuning-compensated CQT chroma of the
-   │            COMBINED instrumental, beat-synchronous Viterbi)        ┐
-   │            (the engine's own fingering output is overwritten)      │
+   ├► chords    (lv-chordia, pipeline/stages/chords.py: 5-net ensemble  ┐
+   │            + HMM on the COMBINED instrumental, no vocals)          │
    └► run_pipeline.finish_tab():                                        ├→ tab.json
         refine.py      verify notes against the stem, declutter          │  (written once,
         arrange.py     chords_cleanup (simple/full chords, key, capo),   │   atomically;
@@ -39,7 +38,7 @@ AUDIO SONGS:
 
 TILES VIDEOS (Synthesia-style):
  video ─► tiles/extract.py (keyboard CV + scan-line note extraction)  → notes.json (EXACT)
- audio ─► beats + chord chroma (same engine) ; octave cross-check fixes absolute pitch
+ audio ─► beats + chords (lv-chordia) ; octave cross-check fixes absolute pitch
  → same arrange/analyze chain; raw video notes kept as tab.json["roll"] for the Roll view
 ```
 
@@ -54,7 +53,7 @@ TILES VIDEOS (Synthesia-style):
 | `pipeline/stages/separation.py` | 2-stage separation, `ensure_chord_mix`, stem globs |
 | `pipeline/stages/beat_tracking.py` | beat_this wrapper (median-interval BPM) |
 | `pipeline/stages/pitch_extraction.py` | YourMT3 notes, bytedance piano, CREPE/pYIN vocals, `_segment_f0` hysteresis |
-| `tab_engine/` (C++) | chroma_analyzer (CQT+tuning+lateral inhibition), chord_classifier (beat-sync Viterbi), note_eliminator, fingering_solver, main (reads `tuning.json` from CWD) |
+| `tab_engine/` (C++) | UNUSED since pipeline v5: chords come from lv-chordia, fingering from fingering.py. Kept until the owner deletes it |
 | `arrange.py` | ghost filters, lead/rhythm split, capo, chord voicings; reads tuning.json |
 | `analyze.py` | theory analysis → `tab.json["analysis"]`; CLI re-analyzes existing songs |
 | `tiles/extract.py` | video → notes: keyboard detection, tile/highlight scan, octave validation |
@@ -68,7 +67,7 @@ TILES VIDEOS (Synthesia-style):
 
 `beats.json`: `{"beats": [s...], "downbeats": [s...], "bpm": float}`
 
-`tab.json` (the app's whole world; written by C++ engine, ENRICHED by python):
+`tab.json` (the app's whole world; built by `run_pipeline._build_tab` + `finish_tab`):
 ```
 metadata: {key:"D minor", flats, bpm, capo, bar_phase, instrument, pipeline_version, verified,
            warnings[], warning?, duration_sec, tuning[6], num_melody, tiles_mode?}
@@ -102,9 +101,6 @@ what lets the stage-B model be swapped without touching any glob.
 ### Build & run
 
 ```bash
-# C++ engine (MSYS2 ucrt64 g++ + ninja; vcpkg supplies libsndfile + nlohmann-json)
-cmake --build tab_engine/build            # rebuild after ANY .cpp/.hpp change
-
 # server — MUST run from repo root (tuning.json + relative dirs) with the venv python:
 .venv/Scripts/python -m uvicorn server.app:app --port 8000     # or start.bat
 
@@ -114,22 +110,20 @@ node --check server/static/app.js
     pipeline/stages/*.py tiles/extract.py
 ```
 
-Fast per-song iteration WITHOUT reprocessing (engine+arrange+analyze on existing stems):
+Fast per-song iteration WITHOUT reprocessing (chords+refine+arrange+fingering+analyze on
+existing stems, written to a scratch folder, never into data/):
 ```bash
-d=data/output/SONG
-./tab_engine/build/tab_engine.exe "$d/notes.json" "$d"/*Guitar*.wav "$d/beats.json" "$d"/*Combined*.wav
-.venv/Scripts/python arrange.py "$d/tab.json" && .venv/Scripts/python analyze.py "$d/tab.json"
+.venv/Scripts/python tools/rerun_scratch.py data/output/SONG /tmp/rerun_SONG
 ```
 
 ---
 
 ## 1. GOLDEN RULES — every one of these already caused a real bug
 
-1. **The C++ engine rewrites tab.json FROM SCRATCH.** Any key python added (vocals,
-   vocal_pitch, analysis, roll) is DESTROYED by an engine run. `run_pipeline.py` snapshots
-   and restores vocals; if you add new tab.json keys, extend that snapshot (`prev_vocals`
-   logic) or re-add them after the engine. If you run the engine manually for testing,
-   know that you just wiped those keys — reprocess restores them.
+1. *(Retired in pipeline v5 with the C++ engine.)* tab.json is now built in memory and
+   written once, atomically, at the end of a run. A run rebuilds it from scratch, so a key
+   that a run may skip (vocals, vocal_pitch) must be carried over from the old tab in
+   `process_audio`, as those two are.
 2. **audio-separator bakes `output_dir` into the model at `load_model()`.** The cache in
    `_get_separator` re-points BOTH `sep.output_dir` and `sep.model_instance.output_dir`.
    Never remove that; never cache a Separator another way. Symptom of regression: stems
@@ -139,8 +133,7 @@ d=data/output/SONG
    run_pipeline.py/analyze.py header). Forgetting this KILLS the whole job with
    `UnicodeEncodeError: 'charmap' codec...`. Also: never put unicode in your own
    test-script prints.
-4. **tuning.json is read from CWD by the C++ engine.** Server and manual engine runs must
-   execute from repo root. If knobs "don't do anything", CWD is wrong.
+4. *(Retired with the C++ engine: `tuning.knob` finds tuning.json next to tuning.py.)*
 5. **The user runs their own server on port 8000.** NEVER start a dev/preview server.
    Verify with `node --check`, `py_compile`, and direct CLI runs of pipeline pieces.
 6. **Version pins that must not move**: `transformers==4.40.2` (YourMT3's T5 needs the
@@ -159,7 +152,8 @@ d=data/output/SONG
    and can be empty on success. Discover outputs by globbing the output dir.
 10. **Beat-sync chords mean boundaries are beats.** Don't add client-side chord smoothing
     back (the old "Smooth" button was removed for cause: three conflicting smoothing
-    layers). Chord flicker fixes belong in `tuning.json` (`transition_penalty`).
+    layers). Chord flicker fixes belong in `chords_cleanup` (`tidy_chords`; the simple level keeps
+    chords of 1.5+ beats, because a chord held for half a bar measures 1.9 as often as 2.1).
 11. **jsVoicing/`_parse` must strip `/bass` and unknown qualities return null voicing** —
     a chord card with no diagram is CORRECT behavior for e.g. `sus2` (no open shape
     table entry), not a bug to "fix" by inventing shapes.
@@ -173,17 +167,13 @@ d=data/output/SONG
 14. **GPU access**: pipeline needs CUDA; a sandboxed/CI shell may report
     `torch.cuda.is_available() == False` even on a GPU machine — that's the sandbox, not
     the app. Never "fix" DEVICE detection because of a sandbox result. CPU-safe pieces
-    for local verification: tiles/extract.py, analyze.py, arrange.py, the C++ engine.
+    for local verification: tiles/extract.py, analyze.py, arrange.py, fingering.py.
 15. **Don't tune accuracy knobs on ONE song** (this happened; cost a day). Where Is My
     Mind = ground truth (verse must decode roots G#→A→E→C#m at ~1.5 s intervals).
     Bezubaan = drone-heavy stress test (D-rooted, −30 cents). Change one knob at a time;
     re-run BOTH songs with the fast iteration loop before accepting.
-16. **The 5th harmonic of any root lands on its MAJOR THIRD's pitch class**, and CQT
-    kernels leak into neighbor semitones. Both are already mitigated (q_mult 1.8,
-    lateral inhibition 0.40). If you touch chroma code, re-verify the WIMM A-major
-    segment: A mass must exceed A#/G# leak bins, C# must be visible (~0.04+).
-    The leak also drives QUALITY errors, which is what `gate_tau` and
-    `thirdless_penalty` defend against — see Section 4.1 for the measurements.
+16. *(Retired with the C++ chroma code. lv-chordia computes its own CQT and estimates
+    each song's tuning; Section 4.1 is kept as history.)*
 17. **Everything is currently UNCOMMITTED on top of `d58100e`.** First action of any
     session: `git add -A && git commit` the working state (message:
     "feat: chord engine v2, separation v2, tiles mode, UI shell, learn engine, tuning knobs").
@@ -402,8 +392,8 @@ lead-vocal karaoke separation model; per-song tuning.json overrides; Electron pa
 3. A change ships only if it improves/holds BOTH reference songs.
 4. Chord truth sources: any published chord chart; compare at beat resolution, roots
    first (quality second, sus/maj confusion is a known acceptable miss).
-5. Never delete tuning.json keys the C++ engine reads — it falls back silently and you'll
-   think your knob does nothing.
+5. Chords have no knobs since pipeline v5: compare detectors with
+   `tools/eval.py --chart` and chord-tone coverage against the notes, not by ear alone.
 
 ### 4.0 refine.py — why the transcription used to be unplayable
 
@@ -481,8 +471,7 @@ https://download.pytorch.org/whl/cu128` (RTX 50-series needs cu128/sm_120) →
 `pip install -r requirements.txt -c constraints.txt` → verify pins: transformers==4.40.2,
 audio-separator 0.44.x, beat_this (checkpoint "final0" auto-downloads), mt3-infer,
 torchcrepe, librosa, soundfile, yt-dlp, opencv-python-headless. FFmpeg on PATH.
-C++: MSYS2 ucrt64 (g++, ninja), `cmake --preset` in tab_engine (vcpkg manifest pulls
-libsndfile, nlohmann-json), binary lands at `tab_engine/build/tab_engine.exe` — the
-static-link flags in CMakeLists keep it self-contained.
+lv-chordia (chords) ships its five model weights inside the wheel, under
+`.venv/share/lv-chordia/cache_data`; `detect_chords` refuses to run if one is missing.
 First GPU run downloads: htdemucs_6s (~2 GB), roformer ckpt (~600 MB), YourMT3, CREPE,
 beat_this — all cached under `pipeline/models/` / HF cache; expect a slow first song.

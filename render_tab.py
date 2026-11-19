@@ -1,5 +1,4 @@
-"""Render a tab.json (produced by the C++ tab engine) into classic ASCII
-guitar tablature.
+"""Render a tab.json into classic ASCII guitar tablature.
 
 Usage:
     python render_tab.py <tab.json> [output.txt]
@@ -7,8 +6,10 @@ Usage:
 
 import json
 import sys
-from collections import defaultdict
+from bisect import bisect_right
 from pathlib import Path
+
+from fingering import _events
 
 # Display order: string 1 (high E) on top, string 6 (low E) on the bottom.
 STRING_LABELS = ["e", "B", "G", "D", "A", "E"]   # index 0 -> string 1 ... index 5 -> string 6
@@ -17,20 +18,22 @@ COLS_PER_LINE = 40       # tab columns before wrapping to a new staff
 BEATS_PER_BAR = 4        # assume 4/4
 
 
-def _columns_from_notes(notes):
-    """Collapse notes that share a (quantized) onset into vertical columns."""
-    grouped = defaultdict(dict)   # onset -> {string: fret}
-    beat_of = {}
-    for n in notes:
-        onset = round(n.get("start_q", n["start"]), 3)
-        grouped[onset][n["string"]] = n["fret"]
-        beat_of[onset] = n.get("beat", -1.0)
+def _beat_at(t, beats):
+    """Fractional beat index of time t, or -1 off the beat grid."""
+    i = bisect_right(beats, t) - 1
+    if i < 0 or i + 1 >= len(beats):
+        return -1.0
+    return i + (t - beats[i]) / (beats[i + 1] - beats[i])
 
+
+def _columns_from_notes(notes, beats=()):
+    """One vertical column per strum (notes the fingering played together)."""
     columns = []
-    for onset in sorted(grouped):
-        frets = grouped[onset]
-        width = max((len(str(f)) for f in frets.values()), default=1)
-        columns.append({"onset": onset, "beat": beat_of[onset], "frets": frets, "width": width})
+    for ev in _events(notes):
+        frets = {n["string"]: n["fret"] for n in ev}
+        onset = ev[0]["start"]
+        columns.append({"onset": round(onset, 3), "beat": _beat_at(onset, beats),
+                        "frets": frets, "width": max(len(str(f)) for f in frets.values())})
     return columns
 
 
@@ -38,7 +41,7 @@ def render(tab: dict) -> str:
     meta = tab.get("metadata", {})
     notes = tab.get("notes", [])
     chords = tab.get("chords", [])
-    columns = _columns_from_notes(notes)
+    columns = _columns_from_notes(notes, tab.get("beats", []))
 
     out = []
     out.append("=" * 72)

@@ -1,11 +1,9 @@
 import json
 import logging
 import os
-import shutil
 import subprocess
 import sys
 import time
-from contextlib import contextmanager
 from pathlib import Path
 
 for _s in (sys.stdout, sys.stderr):   # UTF-8 so ✓/→ prints don't crash on Windows
@@ -27,7 +25,7 @@ from pipeline import (
 
 # Bump whenever a change alters what ends up in tab.json, so the library can
 # flag songs processed by an older pipeline as outdated.
-PIPELINE_VERSION = 4
+PIPELINE_VERSION = 5
 
 _NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
@@ -53,26 +51,6 @@ def _write_tab(tab_json: Path, data: dict) -> None:
     tmp = tab_json.with_suffix(".tmp")
     tmp.write_text(json.dumps(data))
     os.replace(tmp, tab_json)
-
-
-@contextmanager
-def _keep_previous(tab_json: Path):
-    """The C++ engine overwrites tab.json the moment it runs. If anything after
-    that fails, put the previous tab back (or remove the half-built one), so a
-    failed run never leaves a broken song marked as done."""
-    prev = tab_json.with_name("tab.prev.json")
-    had = tab_json.exists()
-    if had:
-        shutil.copy2(tab_json, prev)
-    try:
-        yield
-    except BaseException:
-        if had:
-            os.replace(prev, tab_json)
-        else:
-            tab_json.unlink(missing_ok=True)
-        raise
-    prev.unlink(missing_ok=True)
 
 
 def free_gpu() -> None:
@@ -109,7 +87,7 @@ def _warn(data: dict, msg: str) -> None:
 
 
 def finish_tab(data: dict, stem_path=None) -> dict:
-    """Engine output -> a tab a person can play, in the order that matters:
+    """Raw tab (_build_tab) -> a tab a person can play, in the order that matters:
 
     1. refine  — drop notes the stem has no energy for (skipped for tiles songs:
                  their notes were read off the video, there is nothing to verify);
@@ -140,29 +118,23 @@ def finish_tab(data: dict, stem_path=None) -> dict:
     return data
 
 
-def find_tab_engine_binary() -> Path | None:
-    """Locate the compiled C++ tab engine across platforms / generators."""
-    build_dir = Path(__file__).parent / "tab_engine" / "build"
-    for path in [
-        build_dir / "tab_engine",
-        build_dir / "tab_engine.exe",
-        build_dir / "Release" / "tab_engine.exe",
-        build_dir / "Debug" / "tab_engine.exe",
-        build_dir / "RelWithDebInfo" / "tab_engine.exe",
-    ]:
-        if path.exists():
-            return path
-    return None
-
-
-def _run_engine(notes_path: Path, stem: Path, beats_path: Path, chord_mix: Path) -> None:
-    exe = find_tab_engine_binary()
-    if exe is None:
-        raise RuntimeError("C++ tab engine not built — see README (cmake --build tab_engine/build)")
-    r = subprocess.run([str(exe), str(notes_path), str(stem), str(beats_path), str(chord_mix)],
-                       capture_output=False, text=True)
-    if r.returncode != 0:
-        raise RuntimeError(f"C++ engine failed with code {r.returncode}")
+def _build_tab(notes_path: Path, beats_path: Path, chord_audio: Path) -> dict:
+    """The raw tab: transcribed notes, beats, and chords detected from `chord_audio`.
+    Nothing is written to disk; finish_tab() turns it into something playable."""
+    import soundfile
+    from pipeline.stages.chords import detect_chords
+    beats = _read_json(beats_path)
+    notes = [{"start": n["start_time"], "duration": n["end_time"] - n["start_time"],
+              "pitch": n["pitch"], "name": midi_to_name(n["pitch"])}
+             for n in json.loads(notes_path.read_text())]
+    data = {"metadata": {"bpm": beats.get("bpm") or 0,
+                         "duration_sec": soundfile.info(str(chord_audio)).duration,
+                         "tuning": ["E4", "B3", "G3", "D3", "A2", "E2"]},
+            "beats": beats.get("beats", []),
+            "notes": sorted(notes, key=lambda n: (n["start"], n["pitch"])),
+            "chords": detect_chords(chord_audio)}
+    free_gpu()
+    return data
 
 
 def _vocal_stem(out_dir: Path) -> Path | None:
@@ -185,7 +157,7 @@ def _vocals(vstem: Path, model: str):
 def process_audio(audio_path: Path | str, instrument: str = "guitar", on_stage=None, options=None) -> Path:
     """Run the full pipeline on one file and return its output directory.
 
-    Raises on a failed required stage (separation, transcription, engine,
+    Raises on a failed required stage (separation, transcription, chords,
     arrangement) and leaves the song's previous tab.json untouched. Optional
     stages (beats, note cleanup, vocals) record a warning in the tab instead.
     """
@@ -248,7 +220,7 @@ def process_audio(audio_path: Path | str, instrument: str = "guitar", on_stage=N
         beats_path.write_text(json.dumps({"beats": beat_result.beats,
                                           "downbeats": beat_result.downbeats,
                                           "bpm": beat_result.bpm}, indent=2))
-    elif not beats_path.exists():                 # the engine needs the file
+    elif not beats_path.exists():                 # reprocess expects the file
         beats_path.write_text(json.dumps({"beats": [], "downbeats": [], "bpm": 0}))
 
     # ── 3. Notes (required) ───────────────────────────────────────────────────
@@ -265,50 +237,49 @@ def process_audio(audio_path: Path | str, instrument: str = "guitar", on_stage=N
               "pitch": n.pitch, "velocity": float(n.velocity)} for n in notes], indent=2))
         free_gpu()
 
-    # ── 4. Engine + arrangement (required), vocals (optional) ─────────────────
-    report("Building tab")
-    _banner("STAGE 4 — C++ Tab Engine")
+    # ── 4. Chords + arrangement (required), vocals (optional) ─────────────────
+    # tab.json is written once, at the end: a failure anywhere leaves the old one.
+    report("Detecting chords")
+    _banner("STAGE 4 — Chords + arrangement")
     tab_json = out_dir / "tab.json"
-    old = _read_json(tab_json)                     # vocals etc. the engine is about to wipe
-    # Chords come from the full instrumental mix (bass + keys carry the
-    # harmony), not from the transcribed stem alone.
+    old = _read_json(tab_json)                     # vocals to keep if this run skips them
+    # Chords come from the instrumental mix (bass + keys carry the harmony,
+    # vocals only confuse the detector), not from the transcribed stem alone.
     chord_mix = ensure_chord_mix(out_dir) or stem
-    with _keep_previous(tab_json):
-        _run_engine(notes_path, stem, beats_path, chord_mix)
-        data = json.loads(tab_json.read_text())
-        meta = data.setdefault("metadata", {})
-        meta["instrument"] = instrument
-        meta["pipeline_version"] = PIPELINE_VERSION
-        meta["warnings"] = list(pending["metadata"].get("warnings", []))
-        if sep_warning:
-            meta["warning"] = sep_warning
+    data = _build_tab(notes_path, beats_path, chord_mix)
+    meta = data["metadata"]
+    meta["instrument"] = instrument
+    meta["pipeline_version"] = PIPELINE_VERSION
+    meta["warnings"] = list(pending["metadata"].get("warnings", []))
+    if sep_warning:
+        meta["warning"] = sep_warning
 
-        report("Arranging")
-        data = finish_tab(data, stem)
-        print(f"  ✓ Arrangement: {len(data['melody'])} melody notes + {len(data['chords'])} chords")
-        try:
-            from render_tab import render
-            (out_dir / "tab.txt").write_text(render(data), encoding="utf-8")
-        except Exception as exc:  # noqa: BLE001
-            _warn(data, f"ASCII tab not written ({exc}).")
+    report("Arranging")
+    data = finish_tab(data, stem)
+    print(f"  ✓ Arrangement: {len(data['melody'])} melody notes + {len(data['chords'])} chords")
+    try:
+        from render_tab import render
+        (out_dir / "tab.txt").write_text(render(data), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        _warn(data, f"ASCII tab not written ({exc}).")
 
-        if run_vocals:
-            report("Extracting vocals")
-            vstem = _vocal_stem(out_dir)
-            if vstem is None:
-                _warn(data, "No vocals stem (interrupted separation?); vocals skipped. "
-                            "Reprocess with vocals enabled.")
-            else:
-                try:
-                    data["vocals"], data["vocal_pitch"] = _vocals(vstem, vocal_model)
-                    print(f"  ✓ Vocals: {len(data['vocals'])} notes")
-                except Exception as exc:  # noqa: BLE001
-                    _warn(data, f"Vocals failed ({exc}); kept the previous vocals, if any.")
-        for k in ("vocals", "vocal_pitch"):        # the engine wiped them; keep the old ones
-            if k not in data and k in old:
-                data[k] = old[k]
+    if run_vocals:
+        report("Extracting vocals")
+        vstem = _vocal_stem(out_dir)
+        if vstem is None:
+            _warn(data, "No vocals stem (interrupted separation?); vocals skipped. "
+                        "Reprocess with vocals enabled.")
+        else:
+            try:
+                data["vocals"], data["vocal_pitch"] = _vocals(vstem, vocal_model)
+                print(f"  ✓ Vocals: {len(data['vocals'])} notes")
+            except Exception as exc:  # noqa: BLE001
+                _warn(data, f"Vocals failed ({exc}); kept the previous vocals, if any.")
+    for k in ("vocals", "vocal_pitch"):
+        if k not in data and k in old:
+            data[k] = old[k]
 
-        _write_tab(tab_json, data)
+    _write_tab(tab_json, data)
     print(f"  ✓ Done in {time.time() - pipeline_start:.0f} s: {tab_json}")
     return out_dir
 
@@ -383,7 +354,8 @@ def process_tiles_video(audio_path: Path | str, video_path: Path | str,
             {"beats": beat_result.beats, "downbeats": beat_result.downbeats,
              "bpm": beat_result.bpm}, indent=2))
 
-    # Engine needs a WAV (chroma). Convert the source audio once.
+    # A WAV copy of the audio: chords are read from it, and it stands in for
+    # the source when that is deleted (reprocess).
     wav = out_dir / f"{stem}_audio.wav"
     if not wav.exists():
         subprocess.run(["ffmpeg", "-y", "-i", str(audio_path), "-ac", "1",
@@ -391,27 +363,25 @@ def process_tiles_video(audio_path: Path | str, video_path: Path | str,
     if not wav.exists():
         raise RuntimeError("ffmpeg could not convert audio for chord analysis")
 
-    report("Building tab")
+    report("Detecting chords")
     tab_json = out_dir / "tab.json"
-    with _keep_previous(tab_json):
-        _run_engine(notes_path, wav, beats_path, wav)
-        report("Arranging")
-        data = json.loads(tab_json.read_text())
-        meta = data.setdefault("metadata", {})
-        meta["instrument"] = "tiles"
-        meta["pipeline_version"] = PIPELINE_VERSION
-        meta["tiles_mode"] = result["mode"]
-        meta["warnings"] = list(pending["metadata"].get("warnings", []))
-        # No stem: these notes were read off the video, not guessed from
-        # audio, so there is nothing to verify (see tools/tiles_audit.py).
-        data = finish_tab(data)
-        # Raw video notes (with hand colors) for the piano-roll view — the
-        # guitar fingering drops piano notes a guitar can't reach.
-        data["roll"] = [{"start": n["start_time"],
-                         "duration": round(n["end_time"] - n["start_time"], 4),
-                         "pitch": n["pitch"], "hand": n.get("hand", "")}
-                        for n in result["notes"]]
-        _write_tab(tab_json, data)
+    data = _build_tab(notes_path, beats_path, wav)
+    report("Arranging")
+    meta = data["metadata"]
+    meta["instrument"] = "tiles"
+    meta["pipeline_version"] = PIPELINE_VERSION
+    meta["tiles_mode"] = result["mode"]
+    meta["warnings"] = list(pending["metadata"].get("warnings", []))
+    # No stem: these notes were read off the video, not guessed from
+    # audio, so there is nothing to verify (see tools/tiles_audit.py).
+    data = finish_tab(data)
+    # Raw video notes (with hand colors) for the piano-roll view — the
+    # guitar fingering drops piano notes a guitar can't reach.
+    data["roll"] = [{"start": n["start_time"],
+                     "duration": round(n["end_time"] - n["start_time"], 4),
+                     "pitch": n["pitch"], "hand": n.get("hand", "")}
+                    for n in result["notes"]]
+    _write_tab(tab_json, data)
     print(f"  ✓ Tiles arrangement: {len(data['notes'])} notes, "
           f"{len(data['chords'])} chords ({result['mode']})")
     return out_dir

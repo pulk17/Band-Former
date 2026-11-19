@@ -1,7 +1,7 @@
 # FIXES — exact changes, in order
 
-**Status (2026-11-19, branch `roadmap-fixes`):** fixes 0, 1, 2, 3, 4 and 5 are done and
-committed (see `git log`). Fix 6 is not started: it installs third-party packages.
+**Status (2026-11-20, branch `roadmap-fixes`):** fixes 0-5 and Fix 6 steps 1-4 are done and
+committed (see `git log`). Fix 6 steps 5-6 (other note transcriber, Ultra stems) are not.
 Deviations from the text below, found while doing it:
 - Fix 2: arrange's duration-based ghost filters are skipped for notes refine verified
   (`metadata.verified`); with fingering moved last, they deleted half of the real notes.
@@ -11,6 +11,13 @@ Deviations from the text below, found while doing it:
   is on pipeline version 4 except `tiles_test_audio`: its "video" is an audio-only .webm,
   so it can't be re-read; its old tab still plays. Old tabs are kept as `tab.before_v3.json`.
 - Fix 5 step 3: one Sound select; capo sits in the header as a select.
+- Fix 6 step 3: no chart could be corrected by ear, so the decision used what can be
+  measured (results under Fix 6). lv-chordia reads the COMBINED instrumental, not the source
+  mp3: on the full mix it lost darkhaast (21.7% vs 79.7% chord-tone coverage).
+- Fix 6 step 4: `tab_engine/` is unused but NOT deleted (its build folder and vcpkg
+  packages are not in git, so deleting is the owner's call).
+- Fix 6 found a cleanup bug: `simple_chords` absorbed chords under 2.0 beats, which ate
+  half-bar chords measured at 1.9 (WIMM's G#). The floor is 1.5 beats now.
 - Extra: A-shape barre voicings (no diagram above fret 7), section names by repetition,
   strumming card omitted when every eighth is a hit, `tools/ui_harness.py`.
 
@@ -24,8 +31,8 @@ Measuring tools already in the repo:
 
 - `python tools/song_stats.py data/output` prints chord count, changes/min, same-string
   collisions and fret jumps for every song.
-- `python tools/rerun_scratch.py data/output/SONG <scratch_dir>` re-runs engine + refine +
-  arrange on a copy, without touching `data/`. Use it to get before/after numbers.
+- `python tools/rerun_scratch.py data/output/SONG <scratch_dir>` re-runs chords + refine +
+  arrange + fingering on a copy, without touching `data/`. Use it to get before/after numbers.
 
 ---
 
@@ -290,7 +297,29 @@ Check: add a song, reload the page mid-job, play another song while it runs.
 
 ## Fix 6 — better detector (needs a download, so ask the owner first)
 
-Not done here because it installs a third-party package. Steps:
+**Done (steps 1-4), 2026-11-20.** The dry run changed no pinned package (it added `h5py`
+and `lv-chordia` only). Chord-tone coverage = share of note time whose pitch class is in
+the sounding chord, simple level, both detectors through the same cleanup, lv-chordia on
+the COMBINED stem:
+
+| song | engine | lv-chordia |
+|---|---|---|
+| aashiqana | 82.5% | 85.1% |
+| Bezubaan | 70.2% (Db 11.7% of the song) | 69.2% (no Db) |
+| Chaar Diwaari | 75.1% | 85.0% |
+| Curtain Blue (38 notes) | 43.7% | 43.7% |
+| darkhaast | 80.0% | 79.0% |
+| iss_tarah | 75.0% | 79.5% |
+| Playing God | 57.3% | 58.7% |
+| tiles_test (exact notes) | 42.3% | 36.1% |
+| where_is_my_mind | 81.3% (F 6.4%) | 85.4% (no F) |
+
+WIMM's known loop E C#m G# A covers 92.1% of the song with lv-chordia, 84.5% with the
+engine. The engine's chord classifier takes the transcribed notes as input, so coverage
+flatters it; its narrow wins are within that bias. lv-chordia also changes chord less
+often (Bezubaan 35 changes vs 66).
+
+Original steps:
 
 1. `pip install --dry-run lv-chordia`. If it would change `torch`, `numpy`, `librosa` or
    `transformers`, stop and install with `--no-deps` plus only the missing packages
@@ -337,6 +366,7 @@ def detect_chords(audio_path):
 
 ## Not verified
 
-- Fix 6 models were never installed or run on this machine.
+- No chord chart was corrected by ear; the Fix 6 decision rests on the table above.
+- Fix 6 steps 5-6 (hf-midi-transcription, Ultra stems) were never installed or run.
 - The UI was checked in `tools/ui_harness.py` (stubbed backend), not against a running
   server; the server lifecycle was checked in-process with FastAPI's TestClient.

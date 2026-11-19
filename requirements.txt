@@ -43,6 +43,9 @@ pytorch_lightning
 # to the pre-refactor 4.40.x line.
 transformers==4.40.2
 
+# Stage 4 — Chords (ISMIR 2019 large-vocabulary model; weights ship in the wheel)
+lv-chordia
+
 # Piano-tiles video mode (tiles/extract.py) — keyboard detection and the
 # scan-line note reader. Headless build: no GUI windows are ever opened.
 opencv-python-headless
