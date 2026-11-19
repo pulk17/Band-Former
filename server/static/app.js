@@ -1,7 +1,6 @@
 (() => {
   const $ = (id) => document.getElementById(id);
   const stage = $("stage"), sx = stage.getContext("2d");
-  const tabStage = $("tabStage"), tx = tabStage.getContext("2d");
   const vocalStage = $("vocalStage"), vc = vocalStage.getContext("2d");
   const rollStage = $("rollStage"), rx = rollStage.getContext("2d");
   const wave = $("wave"), wx = wave.getContext("2d");
@@ -15,7 +14,7 @@
   let vocals = [], vpitch = [], vlo = 48, vhi = 72;
   let roll = [];   // tiles videos: exact piano notes {start,duration,pitch,hand}
   let rlo = 48, rhi = 72;   // roll view's smoothed, auto-following pitch window
-  let view = "overview", content = "both", capo = 0, recommendedCapo = 0, curJob = null;
+  let view = "player", content = "both", capo = 0, recommendedCapo = 0, curJob = null;
   let analysis = {};   // tab.analysis — romans, functions, difficulty, practice…
 
   // ── Chord voicings (computed live so any capo can be selected) ────────────
@@ -295,7 +294,7 @@
     // A piano-tiles or piano song should sound like a piano by default.
     const inst = (tab.metadata || {}).instrument;
     synthInst = (roll.length || inst === "piano" || inst === "tiles") ? "piano" : "guitar";
-    $("synthSel").value = synthInst;
+    $("soundSel").value = soundValue();
     synthReady = ""; stopVoices();
     prepareSynth();
 
@@ -314,7 +313,6 @@
     fillCapoSelect();
     capo = recommendedCapo;
     $("capoSel").value = String(capo);
-    updateCapoBadge();
 
     ctx();
     const ab = await (await fetch(`/api/audio/${id}`)).arrayBuffer();
@@ -322,9 +320,12 @@
     duration = Math.max(duration, buffer.duration);
     computePeaks();
     $("playBtn").disabled = false;
-    buildOverview(); buildChordGrid(); buildLearn();
-    setView("overview");
-    $("status").textContent = [m.warning, ...(m.warnings || [])].filter(Boolean).map((w) => "⚠ " + w).join("  ·  ");
+    buildChordGrid(); buildLearn();
+    setView("player");
+    $("status").textContent = (m.warnings || []).map((w) => "⚠ " + w).join("  ·  ");
+    $("warnText").textContent = m.warning || "";
+    $("warnFix").style.display = m.instrument === "all" ? "none" : "";
+    $("warnBar").classList.toggle("hidden", !m.warning);
     dirty = true;
     refreshJobs();
   }
@@ -333,16 +334,10 @@
     const s = $("capoSel"); s.innerHTML = "";
     for (let k = 0; k <= 9; k++) {
       const o = document.createElement("option"); o.value = String(k);
-      o.textContent = (k === 0 ? "0 (none)" : String(k)) + (k === recommendedCapo && k > 0 ? " ★" : "");
+      o.textContent = (k === 0 ? "No capo" : "Capo " + k) + (k === recommendedCapo ? " ★" : "");
       s.appendChild(o);
     }
   }
-  const updateCapoBadge = () => {
-    const b = $("capoBadge");
-    b.style.display = capo > 0 ? "" : "none";
-    b.textContent = "capo " + capo;
-  };
-
   // ── Add: upload / youtube ─────────────────────────────────────────────────
   $("fileInput").addEventListener("change", async (e) => {
     const f = e.target.files[0]; if (!f) return;
@@ -439,36 +434,27 @@
     }
   }
 
-  // ── Overview ──────────────────────────────────────────────────────────────
-  function buildOverview() {
-    const el = $("overviewBody"); if (!el || !tab) return;
+  // ── Song summary cards (top of Learn) ─────────────────────────────────────
+  function summaryCards(scaleHtml) {
     const m = tab.metadata || {};
     const { list, time } = uniqueChords();
     const romans = analysis.romans || {};
     const diff = analysis.difficulty || {};
     const prog = analysis.progression;
     const sorted = list.slice().sort((a, b) => (time.get(b.name) || 0) - (time.get(a.name) || 0));
-
-    const chordTiles = sorted.slice(0, 8).map((c) => {
-      const v = voicingOf(c);
-      return `<div class="ovChord" data-name="${c.name}">${chordSVG(v, 74)}
-        <div class="nm">${displayName(c.name)}</div><div class="ro">${romans[c.name] || ""}</div></div>`;
-    }).join("");
-
+    const chordTiles = sorted.slice(0, 8).map((c) =>
+      `<div class="ovChord" data-name="${c.name}">${chordSVG(voicingOf(c), 74)}
+        <div class="nm">${displayName(c.name)}</div><div class="ro">${romans[c.name] || ""}</div></div>`).join("");
     const bars = ["chords", "changes", "riff"].map((k) => {
       const v = diff[k] || 0;
       return `<div class="diffBar"><span class="lbl">${k}</span><div class="track"><div class="fill" style="width:${v * 20}%"></div></div><span>${v || "—"}/5</span></div>`;
     }).join("");
-
     const progHtml = prog
       ? `<p class="prog">${prog.chords.map((n, i) => `<span>${displayName(n)}<span class="rn">${prog.romans[i] || ""}</span></span>`).join("<i>→</i>")}</p>
          <p class="muted">This loop repeats ${prog.count}× — it IS the song.</p>`
       : "<p class='muted'>No dominant loop found — the chords move freely.</p>";
-
-    el.innerHTML = `
-      <div class="ovGrid">
+    return `
         <section class="card">
-          <div class="ovBig"></div>
           <div class="ovStats">
             <div class="ovStat"><b>${keyName(m.key)}</b><span>key</span></div>
             <div class="ovStat"><b>${m.bpm ? Number(m.bpm).toFixed(0) : "—"}</b><span>bpm</span></div>
@@ -476,31 +462,20 @@
             <div class="ovStat"><b>${list.length}</b><span>chords</span></div>
             <div class="ovStat"><b>${(tab.melody || []).length}</b><span>lead notes</span></div>
           </div>
-          <div class="ovCTA">
-            <button class="primary" id="ovPractice">Start guided practice</button>
-            <button id="ovPlay">Open player</button>
-          </div>
-        </section>
-        <section class="card">
-          <h3>Difficulty</h3>
-          ${bars}
-          <p class="muted">${diff.barre_required ? "Includes barre shapes — the capo suggestion removes most of them." : "No barre chords needed at the suggested capo."}</p>
+          ${scaleHtml}
         </section>
         <section class="card">
           <h3>The loop</h3>
           ${progHtml}
+          <h3 style="margin-top:14px">Difficulty</h3>
+          ${bars}
+          <p class="muted">${diff.barre_required ? "Includes barre shapes — the capo suggestion removes most of them." : "No barre chords needed at the suggested capo."}</p>
         </section>
         <section class="card" style="grid-column: 1 / -1;">
           <h3>Chord palette — most played first</h3>
           <div class="ovChords">${chordTiles}</div>
           <p class="muted">Click a chord to jump to where it first plays.</p>
-        </section>
-      </div>`;
-    el.querySelectorAll(".ovChord").forEach((tile) => {
-      tile.onclick = () => { const f = chords.find((x) => x.name === tile.dataset.name); if (f) { seekTo(f.start); setView("player"); } };
-    });
-    const bp = $("ovPractice"); if (bp) bp.onclick = () => setView("learn");
-    const bo = $("ovPlay"); if (bo) bo.onclick = () => setView("player");
+        </section>`;
   }
 
   // ── Learn view (driven by tab.analysis) ───────────────────────────────────
@@ -561,11 +536,7 @@
 
     el.innerHTML = `
       <div class="learnGrid">
-        <section class="card">
-          <h3>This song in a nutshell</h3>
-          <p><b>Key:</b> ${keyName(key)} &nbsp; <b>Tempo:</b> ${m.bpm ? Number(m.bpm).toFixed(0) : "?"} BPM &nbsp; ${capo > 0 ? `<b>Capo:</b> fret ${capo}` : "<b>No capo</b>"}</p>
-          ${scaleHtml}
-        </section>
+        ${summaryCards(scaleHtml)}
         <section class="card">
           <h3>Practice plan</h3>
           ${plan}
@@ -600,6 +571,9 @@
         </section>
       </div>`;
 
+    el.querySelectorAll(".ovChord").forEach((tile) => {
+      tile.onclick = () => { const f = chords.find((x) => x.name === tile.dataset.name); if (f) { seekTo(f.start); setView("player"); } };
+    });
     el.querySelectorAll(".planStep").forEach((st) => {
       st.onclick = () => {
         const s = getDone();
@@ -664,7 +638,7 @@
         phrases.push([s, last.start + last.duration]);
         const ph = phrases[riffPhrase % phrases.length]; riffPhrase++;
         setLoop(ph[0] - 0.3, ph[1] + 0.3);
-        setSpeed(0.5); setView("tab"); play(loopA); return;
+        setContent("melody"); setSpeed(0.5); setView("player"); play(loopA); return;
       }
     }
     if (step === "sing") { clearLoop(); setSpeed(0.75); setView("vocals"); play(0); return; }
@@ -766,10 +740,13 @@
       if (c.end < tStart || c.start > tEnd) continue;
       const x1 = nowX + (c.start - t) * PPS, x2 = nowX + (c.end - t) * PPS;
       const active = c.start <= t && t < c.end;
+      const unsure = (c.confidence ?? 1) < 0.3;   // the detector itself wasn't sure
       sx.fillStyle = active ? "rgba(255,255,255,0.16)" : "rgba(255,255,255,0.035)";
       sx.fillRect(x1, 0, Math.max(2, x2 - x1), ribbon);
       sx.fillStyle = active ? "#ffffff" : "#8f99ab";
-      if (x2 - x1 > 26) sx.fillText(displayName(c.name), (Math.max(x1, 0) + Math.min(x2, W)) / 2, ribbon / 2);
+      sx.globalAlpha = unsure ? 0.5 : 1;
+      if (x2 - x1 > 26) sx.fillText(displayName(c.name) + (unsure ? "?" : ""), (Math.max(x1, 0) + Math.min(x2, W)) / 2, ribbon / 2);
+      sx.globalAlpha = 1;
     }
     sx.strokeStyle = "rgba(255,255,255,0.10)"; sx.beginPath(); sx.moveTo(0, ribbon); sx.lineTo(W, ribbon); sx.stroke();
 
@@ -825,36 +802,6 @@
         return `<div class="nextItem">${chordSVG(vv, 48)}<div class="ni-meta"><b>${displayName(c.name)}</b>${shape}</div></div>`;
       }).join("");
     }
-  }
-
-  function drawTab(t) {
-    const [W, H] = frameSize(tabStage, tx);
-    tx.clearRect(0, 0, W, H);
-    const nowX = Math.round(W * NOW), pad = 44, laneH = (H - 2 * pad) / 6;
-    tx.lineWidth = 1; tx.font = "13px ui-monospace, monospace"; tx.textBaseline = "middle";
-    for (let s = 0; s < 6; s++) {
-      const y = pad + laneH * (s + 0.5);
-      tx.strokeStyle = "rgba(255,255,255,0.12)"; tx.beginPath(); tx.moveTo(0, y); tx.lineTo(W, y); tx.stroke();
-      tx.textAlign = "left"; tx.fillStyle = COLORS[s]; tx.globalAlpha = 0.7; tx.fillText(LABELS[s], 9, y); tx.globalAlpha = 1;
-    }
-    if (beats.length) { tx.strokeStyle = "rgba(255,255,255,0.06)"; const phase = (tab.metadata || {}).bar_phase || 0; beats.forEach((b, i) => { if ((i - phase) % 4) return; const x = nowX + (b - t) * PPS; if (x < 0 || x > W) return; tx.beginPath(); tx.moveTo(x, pad); tx.lineTo(x, H - pad); tx.stroke(); }); }
-    const tStart = t - nowX / PPS, tEnd = t + (W - nowX) / PPS;
-    tx.font = "bold 16px ui-monospace, monospace"; tx.textAlign = "center";
-    for (let i = Math.max(0, lower(melodyNotes, tStart) - 6); i < melodyNotes.length; i++) {
-      const n = melodyNotes[i]; if (n.start > tEnd) break; if (n.start < tStart - 1) continue;
-      // Frets already respect the recommended capo; only a capo raised past it
-      // puts notes out of reach.
-      if (n.fret < capo) continue;
-      const rp = { s: n.string - 1, f: n.fret };
-      const s = rp.s; if (s < 0 || s > 5) continue;
-      const sf = rp.f - capo;
-      const x = nowX + (n.start - t) * PPS, y = pad + laneH * (s + 0.5);
-      const active = n.start <= t && t <= n.start + n.duration;
-      tx.fillStyle = active ? "#ffffff" : COLORS[s];
-      tx.fillText(String(sf), x, y);
-    }
-    tx.textAlign = "left";
-    tx.strokeStyle = NOWLINE; tx.lineWidth = 2; tx.beginPath(); tx.moveTo(nowX, pad - 8); tx.lineTo(nowX, H - pad + 8); tx.stroke(); tx.lineWidth = 1;
   }
 
   function drawVocals(t) {
@@ -1030,7 +977,6 @@
     dirty = false;
     if (view === "player") drawPlayer(t);
     else if (view === "roll") drawRoll(t);
-    else if (view === "tab") drawTab(t);
     else if (view === "vocals") drawVocals(t);
     else if (view === "chords") updateGrid(t);
     drawWave(t);
@@ -1041,16 +987,22 @@
   $("playBtn").onclick = toggle;
   window.addEventListener("resize", () => { dirty = true; });
   $("speedSel").onchange = (e) => { rate = parseFloat(e.target.value); if (playing) play(songTime()); };
-  $("capoSel").onchange = (e) => { capo = parseInt(e.target.value, 10) || 0; updateCapoBadge(); buildChordGrid(); buildLearn(); buildOverview(); dirty = true; };
+  $("capoSel").onchange = (e) => { capo = parseInt(e.target.value, 10) || 0; buildChordGrid(); buildLearn(); dirty = true; };
 
   function setView(v) {
     view = v;
     for (const b of $("viewSeg").children) b.classList.toggle("active", b.dataset.view === v);
-    for (const id of ["overview", "player", "roll", "chords", "tab", "vocals", "learn"]) $(id + "View").classList.toggle("hidden", id !== v);
+    for (const id of ["player", "roll", "chords", "vocals", "learn"]) $(id + "View").classList.toggle("hidden", id !== v);
     lastName = ""; dirty = true;
   }
   $("viewSeg").onclick = (e) => { if (e.target.dataset.view) setView(e.target.dataset.view); };
-  $("contentSeg").onclick = (e) => { const c = e.target.dataset.content; if (!c) return; content = c === "all" ? "both" : c; for (const b of $("contentSeg").children) b.classList.toggle("active", b.dataset.content === e.target.dataset.content); dirty = true; };
+  function setContent(c) {
+    content = c;
+    for (const b of $("contentSeg").children) b.classList.toggle("active", b.dataset.content === c);
+    if (playing) synthIdx = lower(synthNotes(), songTime());
+    dirty = true;
+  }
+  $("contentSeg").onclick = (e) => { if (e.target.dataset.content) setContent(e.target.dataset.content); };
 
   $("loopBtn").onclick = () => {
     const btn = $("loopBtn");
@@ -1061,22 +1013,20 @@
   };
   $("metroBtn").onclick = () => { metro = !metro; $("metroBtn").classList.toggle("on", metro); };
 
+  // One Sound control: "original", or "<both|instrument>:<guitar|piano>".
+  const soundValue = () => sound === "original" ? "original" : sound + ":" + synthInst;
   $("soundSel").onchange = async (e) => {
-    sound = e.target.value; ctx(); applySound();
-    if (sound === "original") stopVoices();
+    const [mode, inst] = e.target.value.split(":");
+    sound = mode; if (inst) synthInst = inst;
+    ctx(); applySound(); stopVoices();
     await prepareSynth();
     if (playing) synthIdx = lower(synthNotes(), songTime());   // don't re-fire what already passed
-  };
-  $("synthSel").onchange = async (e) => {
-    synthInst = e.target.value; stopVoices();
-    await prepareSynth();
-    if (playing) synthIdx = lower(synthNotes(), songTime());
   };
   $("detailSel").onchange = (e) => {
     detail = e.target.value;
     if (!tab) return;
     applyDetail();
-    lastName = ""; buildChordGrid(); buildOverview(); buildLearn(); dirty = true;
+    lastName = ""; buildChordGrid(); buildLearn(); dirty = true;
   };
 
   // settings modal
@@ -1099,6 +1049,12 @@
       // re-transcription on every reprocess.
       instrument: $("optInst").value,
     });
+  };
+
+  $("warnFix").onclick = () => {
+    if (!curJob) return;
+    $("warnBar").classList.add("hidden");
+    reprocess(curJob, { instrument: "all", run_beats: true, run_vocals: true, vocal_model: $("optVocalModel").value });
   };
 
   async function reprocess(id, body) {
@@ -1257,6 +1213,7 @@
     return true;
   }
   $("tuningBtn").onclick = async () => {
+    $("settingsModal").classList.add("hidden");
     const d = await (await fetch("/api/tuning")).json();
     tuningDefaults = d.defaults;
     renderTuning(d.defaults, d.current || {});
@@ -1286,7 +1243,7 @@
       if (r.ok) { const sh = await r.json(); BARRE = sh.barre || {}; OPEN = sh.open || {}; }
     } catch (e) {}
     if (!Object.keys(BARRE).length) $("status").textContent = "Restart the server to load chord diagrams.";
-    watchCanvas(stage); watchCanvas(tabStage); watchCanvas(vocalStage); watchCanvas(rollStage); watchCanvas(wave);
+    watchCanvas(stage); watchCanvas(vocalStage); watchCanvas(rollStage); watchCanvas(wave);
     requestAnimationFrame(frame);
     const jobs = await refreshJobs();
     const done = jobs.find((j) => j.status === "done");

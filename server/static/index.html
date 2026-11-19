@@ -35,7 +35,6 @@
           <option value="other">Other</option>
         </select>
         <button id="settingsBtn" title="Processing options">⚙</button>
-        <button id="tuningBtn" title="Accuracy tuning — every detection knob, adjustable in-app">Tune</button>
       </div>
       <label class="tilesChk" title="Synthesia-style falling-tiles video: notes read from the VIDEO (near-exact) instead of audio transcription">
         <input type="checkbox" id="tilesChk" /> Piano-tiles video
@@ -53,7 +52,7 @@
       <div class="badges">
         <span class="badge" id="keyBadge">key —</span>
         <span class="badge" id="bpmBadge">— bpm</span>
-        <span class="badge" id="capoBadge" style="display:none">capo —</span>
+        <select id="capoSel" class="badge" title="Capo position. ★ = the suggestion: the fret that turns the most playing time into open chords."></select>
         <span class="badge" id="diffBadge" style="display:none">difficulty —</span>
         <select id="detailSel" class="badge" title="Simple: plain major/minor chords, about one change per bar. Detailed: every 7th, sus and slash chord the detector heard.">
           <option value="simple">Chords: simple</option>
@@ -61,22 +60,22 @@
         </select>
       </div>
       <div class="seg" id="viewSeg" title="View">
-        <button data-view="overview" class="active">Overview</button>
-        <button data-view="player">Player</button>
+        <button data-view="player" class="active">Player</button>
         <button data-view="roll" style="display:none">Roll</button>
         <button data-view="chords">Chords</button>
-        <button data-view="tab">Tab</button>
         <button data-view="vocals">Vocals</button>
         <button data-view="learn">Learn</button>
       </div>
     </header>
 
     <div id="status" class="status"></div>
+    <div id="warnBar" class="warnBar hidden">
+      <span id="warnText"></span>
+      <button id="warnFix" title="Transcribe from all instruments mixed together instead of the one stem">Reprocess as all instruments</button>
+    </div>
 
     <main id="stageArea">
-      <section id="overviewView" class="view"><div id="overviewBody" class="overviewBody"></div></section>
-
-      <section id="playerView" class="view hidden">
+      <section id="playerView" class="view">
         <canvas id="stage"></canvas>
         <aside class="chordPanel">
           <div class="nowLabel">NOW</div>
@@ -90,7 +89,6 @@
 
       <section id="rollView" class="view hidden"><canvas id="rollStage"></canvas></section>
       <section id="chordsView" class="view hidden"><div id="chordGrid" class="chordGrid"></div></section>
-      <section id="tabView" class="view hidden"><canvas id="tabStage"></canvas></section>
       <section id="vocalsView" class="view hidden"><canvas id="vocalStage"></canvas></section>
       <section id="learnView" class="view hidden"><div id="learnBody" class="learnBody"></div></section>
 
@@ -106,7 +104,6 @@
         <button data-content="both" class="active">Both</button>
         <button data-content="melody">Lead</button>
         <button data-content="chords">Rhythm</button>
-        <button data-content="all">All</button>
       </div>
       <label class="ctl">Speed
         <select id="speedSel">
@@ -114,20 +111,15 @@
           <option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option>
         </select>
       </label>
-      <label class="ctl" title="Play the transcription back on a synthesised instrument — the fastest way to judge whether it got the song right">Hear
+      <label class="ctl" title="Play the transcription back on a synthesised guitar or piano, alone or over the song — the fastest way to judge whether it got the song right">Sound
         <select id="soundSel">
           <option value="original">Original</option>
-          <option value="both">Both</option>
-          <option value="instrument">Transcription</option>
+          <option value="both:guitar">Original + guitar</option>
+          <option value="instrument:guitar">Guitar only</option>
+          <option value="both:piano">Original + piano</option>
+          <option value="instrument:piano">Piano only</option>
         </select>
       </label>
-      <label class="ctl">as
-        <select id="synthSel" title="Guitar is a plucked-string model; piano is an inharmonic struck-string model. For a piano-tiles song the piano plays the notes read off the video.">
-          <option value="guitar">Guitar</option>
-          <option value="piano">Piano</option>
-        </select>
-      </label>
-      <label class="ctl">Capo<select id="capoSel"></select></label>
       <button id="loopBtn" title="Set A then B to loop">Loop</button>
       <button id="metroBtn" title="Metronome">Metro</button>
     </footer>
@@ -170,6 +162,7 @@
         </select>
       </label>
       <button id="runSettingsBtn" class="primary">Apply & Run</button>
+      <button id="tuningBtn" class="linkBtn" title="Every detection knob, adjustable in-app">Advanced tuning…</button>
       <button id="redoVocalsBtn" title="Re-extract only the vocals of the current song with the model chosen above — runs in the background, no full reprocess">Redo vocals only (background)</button>
     </div>
   </div>
