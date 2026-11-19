@@ -153,20 +153,17 @@ def _detect_sections(chords: list, beats: list) -> list:
         grams = Counter(tuple(seq[j:j + 2]) for j in range(len(seq) - 1))
         sig = grams.most_common(1)[0][0] if grams else ("-",)
         segs.append({"a": a, "b": b, "sig": sig})
-    # name by repetition of signature
+    # Name by what repeats: the most-repeated loop is the chorus, any other
+    # repeated loop a verse, a one-off is the intro/outro at the ends and a
+    # bridge in between. (Numbering every repeat "verse 9" said nothing.)
     sig_count = Counter(s["sig"] for s in segs)
     chorus_sig = sig_count.most_common(1)[0][0] if sig_count else None
-    out, verse_n = [], 0
+    out = []
     for idx, s in enumerate(segs):
-        if idx == 0 and sig_count[s["sig"]] == 1:
-            name = "intro"
-        elif s["sig"] == chorus_sig and sig_count[chorus_sig] > 1:
-            name = "chorus"
-        elif sig_count[s["sig"]] > 1:
-            verse_n += 1
-            name = f"verse {verse_n}"
+        if sig_count[s["sig"]] > 1:
+            name = "chorus" if s["sig"] == chorus_sig else "verse"
         else:
-            name = "bridge"
+            name = "intro" if idx == 0 else "outro" if idx == len(segs) - 1 else "bridge"
         out.append({"name": name,
                     "start": round(beats[s["a"]], 2),
                     "end": round(beats[s["b"]], 2)})
@@ -205,6 +202,10 @@ def _strumming(tab: dict, beats: list):
             marks.append("D" if s % 2 == 0 else "U")
         else:
             marks.append("·")
+    if "·" not in marks:
+        # Every eighth is "hit": refined notes ring and sit on the grid, so this
+        # came out for every song and told nobody anything. No card is better.
+        return None
     hit_avg = sum(h for h in hist if h >= 0.45 * peak) / max(1, sum(1 for h in hist if h >= 0.45 * peak))
     conf = min(1.0, hit_avg / (sum(hist) / 8 + 1e-9) / 2)
     return {"pattern": " ".join(marks), "confidence": round(conf, 2)}
