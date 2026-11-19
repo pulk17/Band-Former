@@ -46,6 +46,12 @@ transformers==4.40.2
 # Stage 4 — Chords (ISMIR 2019 large-vocabulary model; weights ship in the wheel)
 lv-chordia
 
+# Stage 3b — Guitar notes: the high-resolution guitar model (Riley et al. 2024,
+# weights from huggingface.co/xavriley/midi-transcription-models, ~100 MB, fetched
+# on first guitar song). Not on PyPI: the author's fork of piano_transcription_inference,
+# pinned to the commit that was tested.
+piano-transcription-inference @ git+https://github.com/xavriley/piano_transcription_inference.git@7568dc7f78b625e40cf9776e2806d164006610e3
+
 # Piano-tiles video mode (tiles/extract.py) — keyboard detection and the
 # scan-line note reader. Headless build: no GUI windows are ever opened.
 opencv-python-headless

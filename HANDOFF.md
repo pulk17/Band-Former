@@ -25,7 +25,8 @@ the song's own data.
 AUDIO SONGS:
  input audio ─► separation (audio-separator: BS-Roformer → htdemucs_6s stems)
    ├► beats     (beat_this)                          → beats.json
-   ├► notes     (YourMT3 via mt3-infer; piano stems → bytedance model) → notes.json
+   ├► notes     (guitar stems → high-res guitar model, guitar-fl.pth;
+   │            piano stems → bytedance model; else YourMT3)        → notes.json
    ├► chords    (lv-chordia, pipeline/stages/chords.py: 5-net ensemble  ┐
    │            + HMM on the COMBINED instrumental, no vocals)          │
    └► run_pipeline.finish_tab():                                        ├→ tab.json

@@ -1,7 +1,7 @@
 # FIXES — exact changes, in order
 
 **Status (2026-11-20, branch `roadmap-fixes`):** fixes 0-5 and Fix 6 steps 1-4 are done and
-committed (see `git log`). Fix 6 steps 5-6 (other note transcriber, Ultra stems) are not.
+committed (see `git log`), and Fix 6 step 5 (guitar note model). Step 6 (Ultra stems) is not.
 Deviations from the text below, found while doing it:
 - Fix 2: arrange's duration-based ghost filters are skipped for notes refine verified
   (`metadata.verified`); with fingering moved last, they deleted half of the real notes.
@@ -14,6 +14,9 @@ Deviations from the text below, found while doing it:
 - Fix 6 step 3: no chart could be corrected by ear, so the decision used what can be
   measured (results under Fix 6). lv-chordia reads the COMBINED instrumental, not the source
   mp3: on the full mix it lost darkhaast (21.7% vs 79.7% chord-tone coverage).
+- Fix 6 step 5: `hf-midi-transcription` is not on PyPI. It is github.com/xavriley/hf_midi_transcription;
+  the pipeline calls its dependency (a fork of piano_transcription_inference) directly with
+  `guitar-fl.pth`, which beat the package default `guitar-gaps.pth` on every song.
 - Fix 6 step 4: `tab_engine/` is unused but NOT deleted (its build folder and vcpkg
   packages are not in git, so deleting is the owner's call).
 - Fix 6 found a cleanup bug: `simple_chords` absorbed chords under 2.0 beats, which ate
@@ -355,7 +358,13 @@ def detect_chords(audio_path):
    `{start, duration, pitch, name}`) and delete `tab_engine/`, the engine subprocess
    calls, the `chroma` and `chord` sections of `tuning.json` and `TUNING_FACTORY`, and
    golden rules 1, 4 and 16 in `HANDOFF.md`.
-5. Same procedure for notes: `pip install hf-midi-transcription`, transcribe the guitar
+5. **Done, 2026-11-20.** Share of notes refine drops as unverified, YourMT3 → guitar-fl:
+   aashiqana 18.5 → 4.5%, Bezubaan 29.2 → 0.4%, Chaar Diwaari 9.7 → 2.7%, Curtain Blue
+   6.8 → 0.9%, darkhaast 19.8 → 2.8%, Playing God 17.8 → 3.2%, WIMM 22.8 → 16.6%. Raw
+   notes on a chord tone (lv-chordia chords, which never see the notes): 6 of 7 songs up,
+   darkhaast 67.8 → 86.3%, WIMM 68.3 → 83.7%. Bezubaan keeps 194 notes instead of 736.
+   Not done: the listening check. YourMT3's notes are kept as `notes.yourmt3.json`.
+   Original step: Same procedure for notes: `pip install hf-midi-transcription`, transcribe the guitar
    stem with `instrument="guitar"`, and compare the share of notes `refine` drops as
    unverified (today 17-42%). Switch only if that share is lower on at least four of
    five songs and "Hear: Transcription" sounds closer.
@@ -367,6 +376,7 @@ def detect_chords(audio_path):
 ## Not verified
 
 - No chord chart was corrected by ear; the Fix 6 decision rests on the table above.
-- Fix 6 steps 5-6 (hf-midi-transcription, Ultra stems) were never installed or run.
+- Fix 6 step 5 was judged on measurements only; nobody has listened to the new notes yet.
+- Fix 6 step 6 (Ultra stems) was never run.
 - The UI was checked in `tools/ui_harness.py` (stubbed backend), not against a running
   server; the server lifecycle was checked in-process with FastAPI's TestClient.

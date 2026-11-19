@@ -25,7 +25,7 @@ from pipeline import (
 
 # Bump whenever a change alters what ends up in tab.json, so the library can
 # flag songs processed by an older pipeline as outdated.
-PIPELINE_VERSION = 5
+PIPELINE_VERSION = 6
 
 _NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
@@ -66,6 +66,7 @@ def free_gpu() -> None:
     separation.release_models()
     beat_tracking._predictor = None
     pitch_extraction._piano_tr = None
+    pitch_extraction._guitar_tr = None
     try:
         import mt3_infer
         mt3_infer.clear_cache()

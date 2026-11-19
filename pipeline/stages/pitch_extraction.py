@@ -93,11 +93,44 @@ def _extract_notes_piano(audio_path: Path) -> list[NoteEvent]:
     return notes
 
 
+# Cached guitar transcriptor (loaded on first guitar job).
+_guitar_tr = None
+
+
+def _extract_notes_guitar(audio_path: Path) -> list[NoteEvent]:
+    """High-resolution guitar transcription (Riley et al., ICASSP 2024): the Kong
+    piano CRNN fine-tuned on solo guitar (the François Leduc set). On the guitar
+    stems it leaves 3-17% of notes unverified where YourMT3 leaves 10-29%, and
+    its notes fit the chords better (FIXES.md, Fix 6 step 5)."""
+    global _guitar_tr
+    import librosa
+    from huggingface_hub import hf_hub_download
+    from piano_transcription_inference import PianoTranscription, sample_rate
+
+    if _guitar_tr is None:
+        ckpt = hf_hub_download("xavriley/midi-transcription-models", "guitar-fl.pth")
+        _guitar_tr = PianoTranscription(
+            "Regress_onset_offset_frame_velocity_CRNN", checkpoint_path=ckpt,
+            device="cuda" if DEVICE.type == "cuda" else "cpu",
+            segment_samples=10 * sample_rate, batch_size=8)
+    y, _ = librosa.load(str(audio_path), sr=sample_rate, mono=True)
+    res = _guitar_tr.transcribe(y, None)
+    notes = [NoteEvent(start_time=float(e["onset_time"]),
+                       end_time=float(e["offset_time"]),
+                       pitch=int(e["midi_note"]),
+                       velocity=float(e["velocity"]) / 128.0)
+             for e in res["est_note_events"]]
+    notes.sort(key=lambda n: n.start_time)
+    logger.info("Guitar model extracted %d notes.", len(notes))
+    return notes
+
+
 def extract_notes(audio_path: Path | str, instrument: str = "guitar") -> list[NoteEvent]:
     """
-    Transcribe a stem WAV into NoteEvents. Piano stems route to the dedicated
-    ByteDance piano model when installed (fallback: YourMT3); everything else
-    uses YourMT3 (via the ``mt3-infer`` toolkit).
+    Transcribe a stem WAV into NoteEvents. Guitar stems go to the dedicated
+    high-resolution guitar model, piano stems to the ByteDance piano model when
+    installed; both fall back to YourMT3 (via the ``mt3-infer`` toolkit), which
+    handles every other instrument.
 
     YourMT3 is a multi-instrument transcription model that is dramatically more
     accurate than Basic Pitch on real, full-band material. Because the input
@@ -121,6 +154,11 @@ def extract_notes(audio_path: Path | str, instrument: str = "guitar") -> list[No
         except Exception as exc:  # noqa: BLE001
             logger.info("Piano model unavailable (%s); using YourMT3. "
                         "For better piano: pip install piano_transcription_inference", exc)
+    if instrument == "guitar":
+        try:
+            return _extract_notes_guitar(audio_path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Guitar model unavailable (%s); using YourMT3.", exc)
 
     import librosa
     from mt3_infer import transcribe

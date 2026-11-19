@@ -5,7 +5,7 @@ tracks the beat, transcribes the notes, detects the chords, and works out a
 fingering a guitarist can actually play.
 
 ```
-audio ──► separation → beats → notes (YourMT3) → chords (lv-chordia)
+audio ──► separation → beats → notes (guitar model) → chords (lv-chordia)
           → note cleanup → key, capo, chord shapes → fingering → tab.json
 ```
 
