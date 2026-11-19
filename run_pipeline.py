@@ -347,7 +347,10 @@ def process_tiles_video(audio_path: Path | str, video_path: Path | str,
 
     report = on_stage or (lambda _stage: None)
     audio_path, video_path = Path(audio_path), Path(video_path)
-    out_dir = OUTPUT_DIR / audio_path.stem
+    # The video is always saved as data/video/<song id>.<ext>; the audio may be
+    # the song folder's own converted wav when the original source is gone.
+    stem = video_path.stem
+    out_dir = OUTPUT_DIR / stem
     out_dir.mkdir(parents=True, exist_ok=True)
     pending = {"metadata": {}}
 
@@ -381,7 +384,7 @@ def process_tiles_video(audio_path: Path | str, video_path: Path | str,
              "bpm": beat_result.bpm}, indent=2))
 
     # Engine needs a WAV (chroma). Convert the source audio once.
-    wav = out_dir / f"{audio_path.stem}_audio.wav"
+    wav = out_dir / f"{stem}_audio.wav"
     if not wav.exists():
         subprocess.run(["ffmpeg", "-y", "-i", str(audio_path), "-ac", "1",
                         "-ar", "44100", str(wav)], capture_output=True)

@@ -1,5 +1,19 @@
 # FIXES — exact changes, in order
 
+**Status (2026-11-19, branch `roadmap-fixes`):** fixes 0, 1, 2, 3, 4 and 5 are done and
+committed (see `git log`). Fix 6 is not started: it installs third-party packages.
+Deviations from the text below, found while doing it:
+- Fix 2: arrange's duration-based ghost filters are skipped for notes refine verified
+  (`metadata.verified`); with fingering moved last, they deleted half of the real notes.
+- Fix 2: fingering also forbids one string twice within 55 ms across neighbouring events.
+- Fix 3 step 11 / Fix 5 step 1: the overlay is gone entirely; rows show progress.
+- Fix 4: the three dead folders were processed from their mp3s, not deleted. Every song
+  is on pipeline version 4 except `tiles_test_audio`: its "video" is an audio-only .webm,
+  so it can't be re-read; its old tab still plays. Old tabs are kept as `tab.before_v3.json`.
+- Fix 5 step 3: one Sound select; capo sits in the header as a select.
+- Extra: A-shape barre voicings (no diagram above fret 7), section names by repetition,
+  strumming card omitted when every eighth is a hit, `tools/ui_harness.py`.
+
 For the model doing the work. `PLAN.md` says why; this says what to type.
 Do the fixes in order. After each one run the check, then commit.
 
@@ -323,6 +337,6 @@ def detect_chords(audio_path):
 
 ## Not verified
 
-- Fix 1 code ran on five songs' chord data; the wiring in 1a-1c was not run.
-- Fixes 2, 3 and 5 are specifications; nothing in them was executed.
 - Fix 6 models were never installed or run on this machine.
+- The UI was checked in `tools/ui_harness.py` (stubbed backend), not against a running
+  server; the server lifecycle was checked in-process with FastAPI's TestClient.

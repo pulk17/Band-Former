@@ -28,10 +28,14 @@ AUDIO SONGS:
    ├► notes     (YourMT3 via mt3-infer; piano stems → bytedance model) → notes.json
    ├► chords    (C++ tab_engine: tuning-compensated CQT chroma of the
    │            COMBINED instrumental, beat-synchronous Viterbi)        ┐
-   ├► fingering (C++ minimax Viterbi)                                   ├→ tab.json
-   ├► arrange.py (declutter, lead/rhythm, capo, voicings)               │
-   ├► analyze.py (romans, cadences, difficulty, practice plan)          ┘
-   └► vocals    (torchcrepe full + hysteresis) → merged into tab.json
+   │            (the engine's own fingering output is overwritten)      │
+   └► run_pipeline.finish_tab():                                        ├→ tab.json
+        refine.py      verify notes against the stem, declutter          │  (written once,
+        arrange.py     chords_cleanup (simple/full chords, key, capo),   │   atomically;
+                       lead/rhythm                                       │   previous tab
+        fingering.py   strings/frets: DP, one string per note, capo      │   restored if a
+        analyze.py     romans, cadences, sections, practice plan         ┘   required stage fails)
+   └► vocals    (one torchcrepe pass → notes + contour) → merged into tab.json
 
 TILES VIDEOS (Synthesia-style):
  video ─► tiles/extract.py (keyboard CV + scan-line note extraction)  → notes.json (EXACT)
@@ -66,9 +70,11 @@ TILES VIDEOS (Synthesia-style):
 
 `tab.json` (the app's whole world; written by C++ engine, ENRICHED by python):
 ```
-metadata: {key:"D minor", bpm, capo, instrument, duration_sec, tuning[6], num_melody, tiles_mode?}
+metadata: {key:"D minor", flats, bpm, capo, bar_phase, instrument, pipeline_version, verified,
+           warnings[], warning?, duration_sec, tuning[6], num_melody, tiles_mode?}
 notes:  [{start, start_q, beat, duration, string(1=high e..6), fret, pitch, name, voice:"lead"|"rhythm", melody:bool}]
-chords: [{start, end, name:"G:maj" or "G:maj/B", confidence, voicing?, capoVoicing?}]
+chords: [{start, end, name:"G:maj", confidence, voicing?, capoVoicing?}]   ← simple level (triads)
+chords_full: [...same shape, every detected quality incl. "G:maj/B"...]   ← "Chords: detailed"
 melody: [...same-as-notes subset...]
 beats:  [s...]
 vocals: [{start, end|/duration, pitch, name}]          ← added by vocals stage
@@ -76,6 +82,9 @@ vocal_pitch: [[t, midi_float|null]...]                 ← contour
 analysis: {romans{}, functions{}, progression, cadences[], borrowed[], transitions[], solo_scales[], difficulty{}, practice[]}
 roll:   [{start, duration, pitch, hand:"left"|"right"|""}]   ← tiles songs only
 ```
+
+`job.json` (one per song folder; the server's library is rebuilt from these on startup):
+`{"title", "url", "instrument", "options", "status", "error", "detail"}`
 Chord name grammar: `ROOT:QUAL[/BASS]`, ROOT/BASS ∈ C..B with `#`, QUAL ∈
 maj min 5 7 maj7 min7 sus2 sus4 dim aug 6 m7b5 add9. UI/arrange strip `/BASS`
 before shape lookup (`jsVoicing`, `_parse`).

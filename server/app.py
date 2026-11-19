@@ -194,8 +194,9 @@ def _find_source_audio(stem: str) -> Path | None:
         p = INPUT_DIR / f"{stem}{ext}"
         if p.exists():
             return p
-    # fall back to the isolated guitar stem
-    return _find(stem, "*[Gg]uitar*.wav")
+    # Source gone: a tiles song still has the wav it was converted to for chord
+    # analysis; an audio song has its stems (the guitar one is the best guess).
+    return _find(stem, "*_audio.wav") or _find(stem, "*[Gg]uitar*.wav")
 
 
 def _source_audio(stem: str) -> Path | None:
@@ -480,6 +481,7 @@ def reprocess_job(job_id: str, req: ReprocessRequest) -> JSONResponse:
         if video is None:
             raise HTTPException(404, "the video file for this tiles song is gone — add the song again")
         job.instrument = "tiles"
+        audio_path = _find_source_audio(job.song_stem) or audio_path
         _enqueue(job, audio_path, {"tiles": True, "video_path": str(video),
                                    "reprocess": True, "run_beats": req.run_beats})
         return JSONResponse({"job_id": job_id})

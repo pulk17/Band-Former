@@ -186,7 +186,8 @@ def detect_keyboard(frame) -> dict:
 def extract_notes(video_path: str | Path, stride: int = 1, progress=None) -> dict:
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
-        raise RuntimeError(f"Cannot open video: {video_path}")
+        raise RuntimeError(f"Cannot read the video {Path(video_path).name}: it has no video track "
+                           "OpenCV can decode (an audio-only file?). Add the song again from its video.")
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
