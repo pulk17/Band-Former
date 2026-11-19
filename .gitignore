@@ -64,3 +64,5 @@ combined.txt
 # ── OS junk ──────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
+# tools/ui_harness.py output
+_ui_harness/
