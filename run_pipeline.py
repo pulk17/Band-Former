@@ -22,6 +22,10 @@ from pipeline import (
     extract_vocals, extract_vocal_contour, BeatResult,
 )
 
+# Bump whenever a change alters what ends up in tab.json, so the library can
+# flag songs processed by an older pipeline as outdated.
+PIPELINE_VERSION = 2
+
 _NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
 
@@ -193,6 +197,7 @@ def process_audio(audio_path: Path | str, instrument: str = "guitar", on_stage=N
             data = json.loads(tab_json.read_text())
             meta = data.setdefault("metadata", {})
             meta["instrument"] = instrument
+            meta["pipeline_version"] = PIPELINE_VERSION
             warn = getattr(separation_result, "warning", "")
             if warn:
                 meta["warning"] = warn
@@ -381,6 +386,7 @@ def process_tiles_video(audio_path: Path | str, video_path: Path | str,
             data["analysis"] = build_analysis(data)
             meta = data.setdefault("metadata", {})
             meta["instrument"] = "tiles"
+            meta["pipeline_version"] = PIPELINE_VERSION
             meta["tiles_mode"] = result["mode"]
             # Raw video notes (with hand colors) for the piano-roll view —
             # the guitar fret solver drops out-of-range piano notes.

@@ -66,6 +66,7 @@ class Job:
     status: str = "queued"          # queued | processing | done | error
     stage: str = ""
     error: str = ""
+    outdated: bool = False          # tab.json made by an older pipeline
 
 
 _jobs: dict[str, Job] = {}
@@ -194,10 +195,16 @@ def _seed_existing_jobs() -> None:
     """Register any already-processed songs (those with a tab.json) as done."""
     if not OUTPUT_DIR.is_dir():
         return
+    from run_pipeline import PIPELINE_VERSION
     for d in sorted(OUTPUT_DIR.iterdir()):
         if d.is_dir() and (d / "tab.json").exists():
             jid = d.name
-            _jobs[jid] = Job(id=jid, name=d.name, song_stem=d.name, status="done", stage="complete")
+            try:
+                ver = json.loads((d / "tab.json").read_text()).get("metadata", {}).get("pipeline_version", 0)
+            except Exception:  # noqa: BLE001
+                ver = 0
+            _jobs[jid] = Job(id=jid, name=d.name, song_stem=d.name, status="done", stage="complete",
+                             outdated=ver < PIPELINE_VERSION)
 
 
 def _worker() -> None:

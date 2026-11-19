@@ -43,7 +43,6 @@ tab_engine/include/nlohmann/
 
 # ── Test files ───────────────────────────────────────────────
 tab_engine/tests/
-test_*.py
 
 # ── Scratch / generated ─────────────────────────────────────
 combine.py

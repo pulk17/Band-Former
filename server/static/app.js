@@ -241,7 +241,8 @@
     for (const j of jobs) {
       const row = document.createElement("div");
       row.className = "songRow " + j.status + (j.id === curJob ? " active" : "");
-      row.innerHTML = `<span class="songDot"></span><span class="songName" title="${j.name}">${j.name}</span>`;
+      row.innerHTML = `<span class="songDot"></span><span class="songName" title="${j.name}">${j.name}</span>`
+        + (j.outdated ? `<span class="badge" title="Processed by an older pipeline — reprocess for the current chords and tab">outdated</span>` : "");
       row.onclick = () => { if (j.status === "done") loadJob(j.id); };
 
       const acts = document.createElement("div"); acts.className = "songActs";
@@ -468,7 +469,7 @@
     const romans = analysis.romans || {};
     for (const c of list) {
       const v = voicingOf(c);
-      const shape = (capo > 0 && v) ? `<div class="play">play ${v.name}</div>` : "";
+      const shape = (capo > 0 && v) ? `<div class="play">capo ${capo} · play ${v.name}</div>` : "";
       const ro = romans[c.name] ? `<div class="ro">${romans[c.name]}</div>` : "";
       const d = document.createElement("div");
       d.className = "chordCard"; d.dataset.name = c.name;
