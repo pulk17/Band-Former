@@ -1,7 +1,8 @@
 # FIXES — exact changes, in order
 
 **Status (2026-11-20, branch `roadmap-fixes`):** fixes 0-5 and Fix 6 steps 1-4 are done and
-committed (see `git log`), and Fix 6 step 5 (guitar note model). Step 6 (Ultra stems) is not.
+committed (see `git log`), and Fix 6 step 5 (guitar note model). Step 6 was run: Ultra
+stems did not win, so the default stays Best.
 Deviations from the text below, found while doing it:
 - Fix 2: arrange's duration-based ghost filters are skipped for notes refine verified
   (`metadata.verified`); with fingering moved last, they deleted half of the real notes.
@@ -368,7 +369,14 @@ def detect_chords(audio_path):
    stem with `instrument="guitar"`, and compare the share of notes `refine` drops as
    unverified (today 17-42%). Switch only if that share is lower on at least four of
    five songs and "Hear: Transcription" sounds closer.
-6. Download the Ultra stems model once by processing one new song with Separation
+6. **Run, 2026-11-20; Ultra did not win.** Guitar stems from Ultra vs the existing htdemucs_6s
+   ones, both transcribed with guitar-fl. Unverified share lower on 3 of 7 songs (Curtain
+   Blue, Chaar Diwaari, aashiqana), higher on darkhaast 2.8 → 7.5%, Bezubaan 0.4 → 4.0%,
+   WIMM 16.6 → 19.3%. Final notes on a chord tone lower on 5 of 7 (Bezubaan 79.1 → 55.7%);
+   Curtain Blue 27.5 → 55.8% (43 notes). Separation took 4-8 minutes a song. The model
+   (`pipeline/models/BS-Roformer-SW.ckpt`, 700 MB) is downloaded, so picking Ultra costs no
+   download.
+   Original step: Download the Ultra stems model once by processing one new song with Separation
    quality = Ultra, and repeat step 5's comparison on its guitar stem.
 
 ---
@@ -377,6 +385,6 @@ def detect_chords(audio_path):
 
 - No chord chart was corrected by ear; the Fix 6 decision rests on the table above.
 - Fix 6 step 5 was judged on measurements only; nobody has listened to the new notes yet.
-- Fix 6 step 6 (Ultra stems) was never run.
+- Fix 6 step 6 compared stems by measurements only, on the 7 guitar songs.
 - The UI was checked in `tools/ui_harness.py` (stubbed backend), not against a running
   server; the server lifecycle was checked in-process with FastAPI's TestClient.
